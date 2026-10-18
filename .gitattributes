@@ -1,0 +1,12 @@
+# 二进制产物：不做换行转换
+*.ts3_style binary
+*.ts3_iconpack binary
+*.ts3_plugin binary
+*.ts3_soundpack binary
+*.zip binary
+*.png binary
+*.dll binary
+*.wav binary
+*.ogg binary
+*.obj binary
+*.ttf binary

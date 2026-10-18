@@ -1,0 +1,55 @@
+<!-- begin dummy container including tooltip (single line html table) -->
+
+<div class="InfoFrame" title="<table><tr><td><b><nobr>%%TR_CLIENT_CREATED%%:&nbsp;</nobr></b></td><td><nobr>%%CLIENT_CREATED%%</nobr></td></tr><tr><td><b><nobr>%%TR_CLIENT_LASTCONNECTED%%:&nbsp;</nobr></b></td><td><nobr>%%CLIENT_LASTCONNECTED%%</nobr></td></tr><tr><td><b><nobr>%%TR_CLIENT_TOTALCONNECTIONS%%:&nbsp;</nobr></b></td><td><nobr>%%CLIENT_TOTALCONNECTIONS%%</nobr></td></tr><tr><td colspan=2><hr /></td></tr><tr><td><b><nobr>%%TR_CLIENT_VERSION%%:&nbsp;</nobr></b></td><td><nobr>%%CLIENT_VERSION%% %%CLIENT_VERSION_STATE%%</nobr></td></tr></table>">
+
+  <!-- header: name, nickname chip, one-line meta -->
+
+  <div class="InfoFrame_Header" dir="LTR">
+    %%?CLIENT_COUNTRY_IMAGE_SCALED%%
+    <a href="client://%%CLIENT_ID%%/%%CLIENT_UNIQUE_ID%%~%%CLIENT_NAME_PERCENT_ENCODED%%" class="InfoFrame_NameLink">%%CLIENT_NAME%%</a>
+    <span class="InfoFrame_NickChip">%%?CLIENT_CUSTOM_NICK_NAME%%</span>
+    <div class="InfoFrame_Meta">%%CLIENT_VERSION_SHORT%% · %%CLIENT_PLATFORM%%</div>
+  </div>
+
+  <hr />
+
+  <!-- facts -->
+
+  <table class="InfoFrame_Table" width="100%" cellspacing="0" cellpadding="0">
+    <tr><td class="InfoFrame_Label">%%TR_CLIENT_VERSION%%</td><td class="InfoFrame_Value">%%CLIENT_VERSION_LONG%%</td></tr>
+    <tr><td class="InfoFrame_Label">%%TR_CLIENT_CONNECTED_SINCE%%</td><td class="InfoFrame_Value">%%CLIENT_CONNECTED_SINCE%%</td></tr>
+    <tr><td class="InfoFrame_Label">%%?TR_CLIENT_DESCRIPTION%%</td><td class="InfoFrame_Value">%%?CLIENT_DESCRIPTION%%</td></tr>
+    <tr><td class="InfoFrame_Label">%%?TR_CLIENT_VOLUME_MODIFIER%%</td><td class="InfoFrame_Value InfoFrame_Warn">%%?CLIENT_VOLUME_MODIFIER%% dB</td></tr>
+    %%?PLUGIN_INFO_DATA%%
+  </table>
+
+  <!-- badges -->
+
+  %%??CLIENT_FLAG_BADGES%%<hr />
+  %%??CLIENT_FLAG_BADGES%%<div class="InfoFrame_Section">%%TR_CLIENT_BADGE_SHOWCASE%%</div>
+  %%??CLIENT_FLAG_BADGES%%<table class="InfoFrame_Table" cellspacing="0" cellpadding="0"><tr>
+  %%??CLIENT_FLAG_BADGES%%  <td class="InfoFrame_Value" title="<b>%%CLIENT_BADGE_NAME%%</b><br />%%CLIENT_BADGE_DESCRIPTION%%">%%CLIENT_BADGE_ICON_LARGE%%</td>
+  %%??CLIENT_FLAG_BADGES%%</tr></table>
+
+  <!-- groups -->
+
+  <hr />
+
+  <table class="InfoFrame_Table" width="100%" cellspacing="0" cellpadding="0">
+    <tr><td class="InfoFrame_Section">%%TR_CLIENT_SERVER_GROUPS%%</td></tr>
+    <tr><td class="InfoFrame_Chip">
+      <table cellspacing="0" cellpadding="0"><tr valign="middle">
+        <td>%%CLIENT_SERVER_GROUP_ICON%%</td><td class="InfoFrame_Value">&nbsp;%%CLIENT_SERVER_GROUP_NAME%%</td>
+      </tr></table>
+    </td></tr>
+    <tr><td class="InfoFrame_Section">%%TR_CLIENT_CHANNEL_GROUP%%</td></tr>
+    <tr><td class="InfoFrame_Chip">
+      <table cellspacing="0" cellpadding="0"><tr valign="middle">
+        <td>%%CLIENT_CHANNEL_GROUP_ICON%%</td><td class="InfoFrame_Value">&nbsp;%%CLIENT_CHANNEL_GROUP_NAME%%</td>
+      </tr></table>
+    </td></tr>
+    <tr><td class="InfoFrame_Warn"><br />%%?TR_CLIENT_TALK_REQUEST_TIME%%</td></tr>
+    <tr><td class="InfoFrame_Warn">&nbsp;&nbsp;&nbsp;&nbsp;%%?CLIENT_TALK_REQUEST_MSG%%</td></tr>
+  </table>
+
+</div>
