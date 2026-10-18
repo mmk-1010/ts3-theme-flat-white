@@ -1,0 +1,832 @@
+/*
+ * Flat White — a flat, minimal, white TeamSpeak 3 theme
+ * Target: TS3 client 3.6.x (Qt 5.15)
+ *
+ * Design rules
+ *   1. No global background. TS3 composites many widgets inside each other;
+ *      a blanket `QWidget { background }` bleeds into list items, tooltips and
+ *      template cells, which is what makes grey blocks appear.
+ *   2. Only three fill roles: page (#F7F8FA), surface (#FFFFFF), tint (#E3F1EE).
+ *   3. Structure is drawn with 1px #E4E6EB hairlines, never with fills.
+ *   4. Text is always explicit: #1F2328 primary, #6E7681 secondary.
+ */
+
+/*
+ * Global overrides for QPalette::ColorRole values:
+ * QPalette::Link = #0F766E;
+ *
+ * Chat links (server names, URLs) are painted from the link palette role, not
+ * from the chat stylesheet, so the accent has to be set here.
+ */
+
+/* ------------------------------------------------------------------ */
+/* Base                                                                */
+/* ------------------------------------------------------------------ */
+
+QWidget {
+	/* YaHei UI first: it is the only family here that covers both Latin and
+	   CJK with matching metrics, so mixed-language channel names stay even. */
+	font-family: "Microsoft YaHei UI";
+	font-size: 9pt;
+	color: #1F2328;
+	selection-background-color: #E3F1EE;
+	selection-color: #1F2328;
+}
+
+/* Text-bearing widgets keep the classic blue highlight so selection inside
+   an editor still reads as "selected text", not as a row state. */
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+	selection-background-color: #0F766E;
+	selection-color: #FFFFFF;
+}
+
+QMainWindow, QDialog, QStackedWidget, QTabWidget, QSplitter {
+	background-color: #F7F8FA;
+}
+
+QLabel {
+	background: transparent;
+	color: #1F2328;
+}
+
+QLabel:disabled {
+	color: #B3B9C1;
+}
+
+QToolTip {
+	background-color: #1F2328;
+	color: #FFFFFF;
+	border: none;
+	border-radius: 6px;
+	padding: 5px 9px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Splitters                                                           */
+/* ------------------------------------------------------------------ */
+
+QSplitter::handle {
+	background: transparent;
+}
+
+QSplitter::handle#bookmarksLocalRemoteSplitter,
+QSplitter::handle#identitiesLocalRemoteSplitter,
+QSplitter::handle#profilesLocalRemoteSplitter,
+QSplitter::handle#whisperListsLocalRemoteSplitter {
+	margin: 1.5px;
+	background-image: url('styles:flat_white/splitter.png');
+	background-repeat: no-repeat;
+	background-position: center;
+	height: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Banners                                                             */
+/* ------------------------------------------------------------------ */
+
+QLabel#bookmarksBanner,
+QLabel#identitiesBanner,
+QLabel#accountLoginBanner,
+QLabel#accountCreateBanner {
+	background: #FFFFFF;
+	border-bottom: 1px solid #E4E6EB;
+	color: #1F2328;
+	padding-left: 12px;
+	font-weight: 600;
+	qproperty-minimumSize: 0px 32px;
+}
+
+QLabel#accountLoginBanner,
+QLabel#accountCreateBanner {
+	qproperty-minimumSize: 420px 32px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Menus & toolbar                                                     */
+/* ------------------------------------------------------------------ */
+
+QMenuBar {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	border-bottom: 1px solid #E4E6EB;
+	padding: 1px 4px;
+}
+
+QMenuBar::item {
+	background: transparent;
+	color: #1F2328;
+	padding: 4px 9px;
+	border-radius: 5px;
+}
+
+QMenuBar::item:selected {
+	background-color: #F1F3F6;
+}
+
+QMenuBar::item:pressed {
+	background-color: #E3F1EE;
+}
+
+QMenu {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	padding: 5px;
+}
+
+QMenu::item {
+	background: transparent;
+	color: #1F2328;
+	padding: 6px 26px 6px 22px;
+	border-radius: 5px;
+}
+
+QMenu::item:selected {
+	background-color: #E3F1EE;
+	color: #1F2328;
+}
+
+QMenu::item:disabled {
+	color: #B3B9C1;
+}
+
+QMenu::separator {
+	height: 1px;
+	background: #EEF0F3;
+	margin: 5px 8px;
+}
+
+QToolBar {
+	background-color: #FFFFFF;
+	border: none;
+	border-bottom: 1px solid #E4E6EB;
+	spacing: 2px;
+	padding: 4px 6px;
+}
+
+QToolButton {
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 5px;
+	padding: 3px;
+}
+
+/* Remove the small dropdown triangles Qt draws on toolbar buttons that carry
+   a menu. They add visual noise and are not used for discovery here. */
+QToolButton::menu-indicator {
+	/* `image: none` makes Qt fall back to the style's own arrow, so a
+	   transparent image is the only reliable way to suppress it. */
+	image: url('styles:flat_white/empty.png');
+	width: 0px;
+	height: 0px;
+	border: none;
+}
+
+QToolButton::menu-arrow {
+	image: url('styles:flat_white/empty.png');
+	width: 0px;
+	height: 0px;
+}
+
+QToolButton::menu-button {
+	border: none;
+	background: transparent;
+	width: 0px;
+}
+
+/* TS3 also draws a menu arrow on push buttons that own a popup. */
+QPushButton::menu-indicator {
+	image: url('styles:flat_white/empty.png');
+	width: 0px;
+	height: 0px;
+}
+
+QToolButton:hover {
+	background-color: #F1F3F6;
+}
+
+QToolButton:pressed,
+QToolButton:checked {
+	background-color: #E3F1EE;
+}
+
+QToolButton:disabled {
+	background: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+
+QPushButton {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	border: 1px solid #DCDFE4;
+	border-radius: 6px;
+	padding: 5px 14px;
+	min-height: 18px;
+}
+
+QPushButton:hover {
+	background-color: #F7F8FA;
+	border-color: #C9CED6;
+}
+
+QPushButton:pressed {
+	background-color: #EEF0F3;
+}
+
+QPushButton:focus {
+	border-color: #0F766E;
+}
+
+QPushButton:default {
+	background-color: #0F766E;
+	color: #FFFFFF;
+	border-color: #0F766E;
+}
+
+QPushButton:default:hover {
+	background-color: #4A83F2;
+	border-color: #4A83F2;
+}
+
+QPushButton:default:pressed {
+	background-color: #2560D2;
+	border-color: #2560D2;
+}
+
+QPushButton:disabled {
+	background-color: #FFFFFF;
+	color: #B3B9C1;
+	border-color: #EDEFF2;
+}
+
+QPushButton:checked {
+	background-color: #E3F1EE;
+	color: #0F766E;
+	border-color: #CFE0FA;
+}
+
+/* ------------------------------------------------------------------ */
+/* Inputs                                                              */
+/* ------------------------------------------------------------------ */
+
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	border: 1px solid #DCDFE4;
+	border-radius: 6px;
+	padding: 4px 7px;
+	selection-background-color: #0F766E;
+	selection-color: #FFFFFF;
+}
+
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
+QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+	border-color: #0F766E;
+}
+
+QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+	background-color: #F7F8FA;
+	color: #B3B9C1;
+}
+
+QComboBox::drop-down {
+	border: none;
+	width: 20px;
+}
+
+QComboBox QAbstractItemView {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	border: 1px solid #E4E6EB;
+	border-radius: 6px;
+	padding: 3px;
+	outline: none;
+	selection-background-color: #E3F1EE;
+	selection-color: #1F2328;
+}
+
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+	border: none;
+	width: 16px;
+	background: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Scrollbars                                                          */
+/* ------------------------------------------------------------------ */
+
+QScrollBar:vertical {
+	background: transparent;
+	width: 10px;
+	margin: 0;
+}
+
+QScrollBar:horizontal {
+	background: transparent;
+	height: 10px;
+	margin: 0;
+}
+
+QScrollBar::handle:vertical {
+	background: #D6D9DE;
+	border-radius: 4px;
+	min-height: 28px;
+	margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+	background: #D6D9DE;
+	border-radius: 4px;
+	min-width: 28px;
+	margin: 2px;
+}
+
+QScrollBar::handle:hover {
+	background: #B9BEC6;
+}
+
+QScrollBar::handle:pressed {
+	background: #9AA1AB;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+	width: 0;
+	height: 0;
+	border: none;
+	background: none;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+	background: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Server tree — no fills on items, selection is the only tint           */
+/* ------------------------------------------------------------------ */
+
+QTreeView#ServerTreeView {
+	/* Plain white rows: zebra striping read as noise in a tree that already
+	   has status icons, flags and group icons on every line. */
+	qproperty-alternatingRowColors: false;
+	alternate-background-color: #F2F3F5;
+	qproperty-rootIsDecorated: false;
+	background-color: #F2F3F5;
+	border: none;
+	outline: none;
+	color: #313338;
+	font-family: "Microsoft YaHei UI";
+	font-size: 10pt;
+}
+
+QTreeView {
+	background-color: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	outline: none;
+	color: #1F2328;
+}
+
+/* No `background` here on purpose: declaring one (even transparent) makes the
+   style sheet paint the item itself and suppresses Qt's alternating row
+   colours. Leaving it unset lets the base style fill normal and alternate
+   rows, which is what produces the zebra pattern. */
+QTreeView::item {
+	min-height: 22px;
+	padding: 1px 2px;
+	border: none;
+	color: #1F2328;
+}
+
+QTreeView::item:hover {
+	background: transparent;
+}
+
+/* No automatic tint on channels. `::item:has-children` also matches channels
+   that merely contain clients (clients are tree children too), so it colours
+   occupied leaf channels — not what we want. There is no depth or child-type
+   selector in Qt style sheets, so a permanent row tint cannot be limited to
+   top-level channels. To emphasise a specific channel, upload the marker from
+   dist/channel-icons/ to the server and pick it in the channel editor.
+*/
+/*
+QTreeView#ServerTreeView::item:has-children {
+	background-color: #E3F1EE;
+}
+*/
+
+QTreeView#ServerTreeView::item:selected {
+	background-color: #DBDEE1;
+	color: #313338;
+	border: none;
+}
+
+QTreeView::item:selected {
+	background-color: #DBDEE1;
+	color: #313338;
+	border: none;
+}
+
+QTreeView::branch {
+	background: transparent;
+}
+
+/* Explicit branch arrows: a bare `::branch` rule suppresses Qt's default
+   arrow images, so the open/closed glyphs must be supplied by the theme. */
+QTreeView::branch:has-children:closed {
+	image: url('styles:flat_white/branch_closed.svg');
+}
+
+QTreeView::branch:has-children:open {
+	image: url('styles:flat_white/branch_open.svg');
+}
+
+QTreeView::branch:has-children:closed:hover,
+QTreeView::branch:has-children:open:hover {
+	background: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* List / table views                                                  */
+/* ------------------------------------------------------------------ */
+
+QListView, QTableView, QTableWidget {
+	background-color: #FFFFFF;
+	color: #1F2328;
+	alternate-background-color: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	gridline-color: #EEF0F3;
+	outline: none;
+}
+
+QListView::item, QTableView::item {
+	padding: 3px 4px;
+	border: none;
+	background: transparent;
+}
+
+QListView::item:hover, QTableView::item:hover {
+	background: transparent;
+}
+
+QListView::item:selected, QTableView::item:selected {
+	background-color: #E3F1EE;
+	color: #1F2328;
+	border: none;
+}
+
+QListWidget#localIconsListWidget::item:selected,
+QListWidget#remoteIconsListWidget::item:selected {
+	background-color: #E3F1EE;
+	border: 1px solid #0F766E;
+	border-radius: 6px;
+}
+
+QHeaderView {
+	background: transparent;
+}
+
+QHeaderView::section {
+	background-color: #FFFFFF;
+	color: #6E7681;
+	border: none;
+	border-bottom: 1px solid #E4E6EB;
+	padding: 5px 8px;
+	font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabs                                                                */
+/* ------------------------------------------------------------------ */
+
+QTabWidget::pane {
+	border: none;
+	border-top: 1px solid #E4E6EB;
+	top: -1px;
+	background: #FFFFFF;
+}
+
+QTabBar {
+	background: transparent;
+}
+
+QTabBar::tab {
+	background: transparent;
+	color: #6E7681;
+	border: none;
+	border-bottom: 2px solid transparent;
+	padding: 6px 12px;
+	margin-right: 2px;
+}
+
+QTabBar::tab:hover {
+	color: #1F2328;
+}
+
+QTabBar::tab:selected {
+	color: #0F766E;
+	border-bottom: 2px solid #0F766E;
+}
+
+QTabBar::close-button {
+	image: url('styles:flat_white/tab_close.svg');
+	subcontrol-position: right;
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat / info panes                                                   */
+/* ------------------------------------------------------------------ */
+
+QTextEdit#InfoFrame {
+	background-color: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	padding: 10px;
+	color: #1F2328;
+}
+
+QTextEdit#ChatTab {
+	background-color: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	color: #1F2328;
+	font-family: "Microsoft YaHei UI";
+	font-size: 9pt;
+}
+
+QTextEdit#ChatLineEdit {
+	background-color: #F2F3F5;
+	border: none;
+	border-radius: 8px;
+	/* Fixed box: a height that tracks the document makes the caret jump
+	   between lines while typing. */
+	min-height: 34px;
+	max-height: 34px;
+	/* Geometry is set by the plugin so the field is centred in its row. */
+	padding: 0 12px;
+	margin: 0;
+	min-height: 34px;
+	max-height: 34px;
+	color: #1F2328;
+}
+
+QTextEdit#ChatLineEdit:focus {
+	background-color: #EBEDEF;
+}
+
+QTextEdit#ChatLineEdit[helpTextVisible="true"] {
+	color: #A0A7B0;
+}
+
+QTextEdit#ChatLineEdit[helpTextVisible="false"] {
+	color: #1F2328;
+}
+
+/* The stock emoticon toggle is replaced by the plugin's send button, and the
+   input's own scrollbar strip read as a stray dark block. */
+QToolButton#EmoticonButton {
+	background: transparent;
+	border: none;
+	image: none;
+	max-width: 0px;
+	min-width: 0px;
+	padding: 0;
+	margin: 0;
+}
+
+QTextEdit#ChatLineEdit QScrollBar:vertical,
+QTextEdit#ChatLineEdit QScrollBar:horizontal {
+	background: transparent;
+	width: 0px;
+	height: 0px;
+	margin: 0;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Checkboxes & radio buttons                                          */
+/* ------------------------------------------------------------------ */
+
+QCheckBox, QRadioButton {
+	background: transparent;
+	color: #1F2328;
+	spacing: 7px;
+}
+
+QCheckBox::indicator,
+QTreeView::indicator,
+QTableView::indicator,
+QListView::indicator {
+	width: 16px;
+	height: 16px;
+	border: 1px solid #C9CED6;
+	border-radius: 4px;
+	background-color: #FFFFFF;
+}
+
+QCheckBox::indicator:hover,
+QTreeView::indicator:hover,
+QTableView::indicator:hover,
+QListView::indicator:hover {
+	border-color: #9AA1AB;
+}
+
+QCheckBox::indicator:checked,
+QTreeView::indicator:checked,
+QTableView::indicator:checked,
+QListView::indicator:checked {
+	background-color: #0F766E;
+	border-color: #0F766E;
+	image: url('styles:flat_white/checkbox_check.svg');
+}
+
+QCheckBox::indicator:disabled,
+QTreeView::indicator:disabled,
+QTableView::indicator:disabled,
+QListView::indicator:disabled {
+	background-color: #FFFFFF;
+	border-color: #EDEFF2;
+}
+
+QCheckBox::indicator:checked:disabled,
+QTreeView::indicator:checked:disabled,
+QTableView::indicator:checked:disabled,
+QListView::indicator:checked:disabled {
+	background-color: #B9C9EA;
+	border-color: #B9C9EA;
+}
+
+QRadioButton::indicator {
+	width: 15px;
+	height: 15px;
+	border: 1px solid #C9CED6;
+	border-radius: 8px;
+	background-color: #FFFFFF;
+}
+
+QRadioButton::indicator:checked {
+	background-color: #FFFFFF;
+	border: 5px solid #0F766E;
+}
+
+QRadioButton::indicator:disabled {
+	border-color: #EDEFF2;
+	background-color: #FFFFFF;
+}
+
+/* ------------------------------------------------------------------ */
+/* Group boxes & sliders                                               */
+/* ------------------------------------------------------------------ */
+
+QGroupBox {
+	background: transparent;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+	margin-top: 10px;
+	padding-top: 6px;
+}
+
+QGroupBox::title {
+	subcontrol-origin: margin;
+	subcontrol-position: top left;
+	left: 10px;
+	padding: 0 4px;
+	color: #6E7681;
+	background-color: #F7F8FA;
+}
+
+QSlider::groove:horizontal {
+	height: 4px;
+	background: #E9EBEF;
+	border-radius: 2px;
+}
+
+QSlider::sub-page:horizontal {
+	background: #0F766E;
+	border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+	background: #FFFFFF;
+	border: 1px solid #C9CED6;
+	width: 14px;
+	height: 14px;
+	margin: -6px 0;
+	border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+	border-color: #0F766E;
+}
+
+QProgressBar {
+	background-color: #F1F2F5;
+	border: none;
+	border-radius: 4px;
+	height: 8px;
+	text-align: center;
+	color: #6E7681;
+}
+
+QProgressBar::chunk {
+	background-color: #0F766E;
+	border-radius: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status bar                                                          */
+/* ------------------------------------------------------------------ */
+
+QStatusBar {
+	background-color: #FFFFFF;
+	border-top: 1px solid #E4E6EB;
+	color: #6E7681;
+}
+
+QStatusBar QLabel {
+	padding: 0 5px;
+	border: 0;
+	color: #6E7681;
+	background: transparent;
+}
+
+QStatusBar::item {
+	border: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Options / about headlines                                           */
+/* ------------------------------------------------------------------ */
+
+QLabel#OptionsHeadlineTitleLabel {
+	color: #1F2328;
+	font-weight: 600;
+	font-size: 15pt;
+}
+
+QLabel#OptionsHeadlineDescriptionLabel {
+	color: #6E7681;
+}
+
+QLabel#NewsLeftLabel {
+	padding-right: 6px;
+}
+
+QLabel#appNameLabel {
+	color: #1F2328;
+	font-weight: 600;
+	font-size: 22px;
+}
+
+QWidget#HeadlineLabel {
+	background-color: #FFFFFF;
+	border-bottom: 1px solid #E4E6EB;
+}
+
+/* ------------------------------------------------------------------ */
+/* Server integrations                                                 */
+/* ------------------------------------------------------------------ */
+
+com--teamspeak--ui--ServerIntegrationsWidget QWidget#ExistingServerIntegration,
+com--teamspeak--ui--ServerIntegrationsWidget QWidget#AvailableServerIntegration {
+	background: #E3F1EE;
+	border-radius: 8px;
+}
+
+com--teamspeak--ui--ServerIntegrationsWidget com--teamspeak--ui--IntegrationResponseWidget {
+	background: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+}
+
+com--teamspeak--ui--ServerIntegrationsWidget com--teamspeak--ui--IntegrationBubble {
+	background: #FFFFFF;
+	border: 1px solid #E4E6EB;
+	border-radius: 8px;
+}
+
+com--teamspeak--ui--IntegrationBubbleEditable QComboBox#IntegrationBubbleEditableComboBox {
+	border: 1px solid #DCDFE4;
+	background: #FFFFFF;
+	border-radius: 6px;
+	padding: 2px 9px;
+}
+
+com--teamspeak--ui--ServerIntegrationsWidget com--teamspeak--ui--ErrorIndicator {
+	background: #E5484D;
+	border: none;
+	border-radius: 6px;
+}
+
+com--teamspeak--ui--ErrorIndicator QLabel#IntegrationErrorIndicatorLabel {
+	font-weight: 600;
+	color: #FFFFFF;
+}
+
+
