@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <QColor>
 #include <QHash>
 #include <QSet>
 #include <QString>
@@ -19,17 +20,33 @@
 #include "ts3_functions.h"
 #include "teamspeak/public_rare_definitions.h"
 
+// Palette for the plugin's own widgets. The dark values mirror the Flat Dark
+// stylesheet; the client keeps one theme active per process, so a single
+// process-wide flag is enough.
 namespace discord {
-inline QColor bg() { return QColor(0xFF, 0xFF, 0xFF); }
-inline QColor sidebar() { return QColor(0xF2, 0xF3, 0xF5); }
-inline QColor ink() { return QColor(0x31, 0x33, 0x38); }
-inline QColor muted() { return QColor(0x5C, 0x5E, 0x66); }
-inline QColor faint() { return QColor(0x94, 0x9B, 0xA3); }
-inline QColor selected() { return QColor(0xDB, 0xDE, 0xE1); }
-inline QColor hover() { return QColor(0xE3, 0xE5, 0xE8); }
+void setDark(bool dark);
+bool isDark();
+
+inline QColor bg() { return isDark() ? QColor(0x1B, 0x1D, 0x22) : QColor(0xFF, 0xFF, 0xFF); }
+inline QColor sidebar() { return isDark() ? QColor(0x0F, 0x10, 0x13) : QColor(0xF2, 0xF3, 0xF5); }
+inline QColor panel() { return isDark() ? QColor(0x1B, 0x1D, 0x22) : QColor(0xEB, 0xED, 0xEF); }
+inline QColor ink() { return isDark() ? QColor(0xE7, 0xE9, 0xEC) : QColor(0x31, 0x33, 0x38); }
+inline QColor muted() { return isDark() ? QColor(0xA4, 0xAA, 0xB2) : QColor(0x5C, 0x5E, 0x66); }
+inline QColor faint() { return isDark() ? QColor(0x7C, 0x84, 0x8D) : QColor(0x94, 0x9B, 0xA3); }
+inline QColor selected() { return isDark() ? QColor(0x2C, 0x30, 0x37) : QColor(0xDB, 0xDE, 0xE1); }
+inline QColor hover() { return isDark() ? QColor(0x24, 0x27, 0x2D) : QColor(0xE3, 0xE5, 0xE8); }
 inline QColor blurple() { return QColor(0x58, 0x65, 0xF2); }
-inline QColor green() { return QColor(0x23, 0xA5, 0x5A); }
-inline QColor divider() { return QColor(0xE3, 0xE5, 0xE8); }
+inline QColor green() { return isDark() ? QColor(0x2E, 0xCC, 0x71) : QColor(0x23, 0xA5, 0x5A); }
+inline QColor divider() { return isDark() ? QColor(0x2A, 0x2D, 0x33) : QColor(0xE3, 0xE5, 0xE8); }
+inline QColor accent() { return isDark() ? QColor(0x2D, 0xD4, 0xBF) : QColor(0x0F, 0x76, 0x6E); }
+inline QColor danger() { return isDark() ? QColor(0xE0, 0x6C, 0x64) : QColor(0xC2, 0x5A, 0x52); }
+inline QColor awayColor() { return isDark() ? QColor(0xE3, 0xB3, 0x41) : QColor(0xD9, 0x9A, 0x3D); }
+inline QColor input() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
+inline QColor inputFocus() { return isDark() ? QColor(0x2B, 0x2F, 0x36) : QColor(0xEB, 0xED, 0xEF); }
+inline QColor bubbleSelf() { return isDark() ? QColor(0x10, 0x32, 0x2D) : QColor(0xE3, 0xF1, 0xEE); }
+inline QColor bubbleOther() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
+inline QColor severityRed() { return isDark() ? QColor(0xE8, 0x80, 0x78) : QColor(0xC2, 0x3B, 0x2E); }
+inline QColor severityAmber() { return isDark() ? QColor(0xE0, 0xA8, 0x4A) : QColor(0xB0, 0x74, 0x1E); }
 }  // namespace discord
 
 // ---------------------------------------------------------------------------
@@ -201,13 +218,44 @@ class ModernChat : public QListWidget {
 public:
     explicit ModernChat(QWidget* parent = nullptr);
     void addMessage(const ChatMessage& msg);
-    void setMessages(const QVector<ChatMessage>& ms);
+    void setMessages(const QVector<ChatMessage>& msgs);
     void setEmptyText(const QString& text) { m_emptyText = text; }
+    // Re-reads the palette; called when the client switches between the light
+    // and dark stylesheets at runtime.
+    void applyTheme();
+
+    // Character range of the active text selection inside one row's message
+    // text; used by the bubble delegate to paint the highlight.
+    bool selectionRangeForRow(int row, int& start, int& end) const;
+    QString rowPlainText(int row) const;
 
 protected:
     void paintEvent(QPaintEvent* ev) override;
+    void mousePressEvent(QMouseEvent* ev) override;
+    void mouseMoveEvent(QMouseEvent* ev) override;
+    void mouseReleaseEvent(QMouseEvent* ev) override;
+    void mouseDoubleClickEvent(QMouseEvent* ev) override;
+    void keyPressEvent(QKeyEvent* ev) override;
+    void contextMenuEvent(QContextMenuEvent* ev) override;
 
 private:
+    struct TextPos {
+        int row = -1;
+        int pos = 0;
+    };
+    TextPos positionAt(const QPoint& viewportPos) const;
+    void selectTo(const TextPos& p);
+    void clearTextSelection();
+    void selectAllText();
+    void copySelection();
+    void copyRow(int row);
+    void copyAll();
+
+    int m_selAnchorRow = -1;
+    int m_selAnchorPos = 0;
+    int m_selCursorRow = -1;
+    int m_selCursorPos = 0;
+    bool m_selecting = false;
     QString m_emptyText = QStringLiteral("这里还没有消息，来打个招呼吧");
 };
 

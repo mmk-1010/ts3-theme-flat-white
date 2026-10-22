@@ -1,0 +1,176 @@
+/*
+ * Flat Dark — chat stylesheet (HTML/CSS rendered inside the chat pane)
+ *
+ * Qt's rich-text engine honours only a small subset of CSS. Keep to colors,
+ * weights and spacing. No background fills: the pane is already dark and any
+ * cell background reads as a grey block against it.
+ */
+
+body {
+	color: #E7E9EC;
+	/* TS3's default font has no CJK glyphs, so Latin and Chinese fell back to
+	   different fonts at different visual sizes. Pin the whole document. */
+	font-family: "Microsoft YaHei UI";
+	font-size: 9pt;
+}
+
+/* Theme palette for the classes the client itself assigns. Server-authored
+   messages may carry inline colours; Qt's rich-text engine always gives those
+   precedence over this stylesheet. */
+p, span, div, b, strong, i, em, u, font, code, li, td {
+	font-family: "Microsoft YaHei UI";
+	color: #E7E9EC;
+}
+
+a, a:link, a:visited, a span, a b, a strong {
+	color: #2DD4BF;
+	text-decoration: none;
+}
+
+.TextMessage_Time, .TextMessage_Time * {
+	color: #9AA0A8;
+	font-weight: bold;
+}
+
+p {
+	margin: 6px 0;
+}
+
+a {
+	color: #2DD4BF;
+	text-decoration: none;
+}
+
+/* Object links (clients, channels, servers) */
+.TextMessage_UserLink,
+.TextMessage_OfflineLink,
+.TextMessage_ChannelLink,
+.TextMessage_ServerLink {
+	color: #2DD4BF;
+	text-decoration: none;
+}
+
+/* Normal chatter */
+.TextMessage_Normal,
+.TextMessage_Connected,
+.TextMessage_ClientConnected,
+.TextMessage_ClientJoined {
+	color: #E7E9EC;
+}
+
+/* Quiet, informational lines */
+.TextMessage_Disconnected,
+.TextMessage_ClientDisconnected,
+.TextMessage_ClientSwitched,
+.TextMessage_ClientLeft,
+.TextMessage_BeginHistory,
+.TextMessage_EndHistory {
+	color: #7C848D;
+}
+
+/* Emphasised events */
+.TextMessage_Welcome,
+.TextMessage_HostMessage,
+.TextMessage_Poke {
+	color: #E7E9EC;
+	font-weight: 600;
+}
+
+.TextMessage_HostName {
+	color: #2DD4BF;
+	font-weight: 600;
+}
+
+/* Punitive events */
+.TextMessage_ClientDropped,
+.TextMessage_ClientKicked,
+.TextMessage_ClientBanned,
+.TextMessage_ServerError {
+	color: #E88078;
+}
+
+/* Administrative events */
+.TextMessage_ChannelCreated,
+.TextMessage_ChannelDeleted,
+.TextMessage_ChannelEdited,
+.TextMessage_ChannelMoved,
+.TextMessage_ServerEdited,
+.TextMessage_GroupAssigned,
+.TextMessage_GroupRevoked,
+.TextMessage_TalkPowerAssigned,
+.TextMessage_TalkPowerRevoked,
+.TextMessage_TalkPowerRequested {
+	color: #9AA0A8;
+}
+
+/* Info frame — redesigned panel
+   Qt rich text supports only a small CSS subset: colour, size, weight,
+   background on table cells, and margins. No radius, no shadows. */
+
+.InfoFrame_Header {
+	color: #F2F4F6;
+}
+
+.InfoFrame_NameLink {
+	color: #F2F4F6;
+	font-size: 18px;
+	font-weight: 600;
+	text-decoration: none;
+}
+
+.InfoFrame_NickChip {
+	color: #2DD4BF;
+	font-size: 13px;
+	background-color: #10322D;
+}
+
+.InfoFrame_Meta {
+	color: #A4AAB2;
+	font-size: 13px;
+}
+
+.InfoFrame_Section {
+	color: #A4AAB2;
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.InfoFrame_Label {
+	color: #A4AAB2;
+	font-size: 13px;
+	padding-right: 12px;
+}
+
+.InfoFrame_Value {
+	color: #F2F4F6;
+	font-size: 13px;
+}
+
+.InfoFrame_Warn {
+	color: #E0A84A;
+	font-size: 13px;
+}
+
+.InfoFrame_Chip {
+	background-color: #1B1D22;
+}
+
+.InfoFrame_Body {
+	color: #F2F4F6;
+	font-size: 13px;
+}
+
+.InfoFrame_Table {
+	margin-top: 2px;
+}
+
+.InfoFrame_Table td {
+	padding: 3px 10px 3px 0;
+	color: #F2F4F6;
+	background: transparent;
+}
+
+hr {
+	border: none;
+	border-top: 1px solid #2A2D33;
+}

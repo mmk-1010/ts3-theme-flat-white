@@ -78,6 +78,8 @@ QPointer<QTreeView> g_paneTree;
 QPointer<QWidget> g_infoFrame;
 QPointer<QWidget> g_infoPage;
 QPointer<QStackedWidget> g_chatStack;
+QPointer<QWidget> g_infoBar;
+QPointer<QPushButton> g_infoBack;
 QPointer<QLabel> g_infoTitle;
 QPointer<QLabel> g_infoStatus;
 QPointer<QWidget> g_infoHome;
@@ -98,6 +100,8 @@ QPointer<QWidget> g_userPanelHost;
 QHash<QTreeView*, QPointer<QAbstractItemDelegate>> g_oldDelegates;
 bool g_installed = false;
 bool g_firstPaintDone = false;
+// -1 = not detected yet, 0 = light stylesheet, 1 = dark stylesheet.
+int g_darkMode = -1;
 
 void openPrivateChat(unsigned short clientId, const QString& name);
 
@@ -547,6 +551,156 @@ void hideInfoPage() {
     updateChatOverlay();
 }
 
+// ------------------------------------------------------------- theme mode
+
+// The client keeps exactly one style sheet active. The dark package names its
+// asset folder flat_dark, and the style sheet text carries that path; the
+// palette is the second source of truth (the client parses QPalette::Window
+// from the style sheet). Both survive a runtime style switch.
+bool detectDarkTheme() {
+    if (!qApp) return false;
+    const QString ss = qApp->styleSheet();
+    if (ss.contains(QLatin1String("flat_dark"), Qt::CaseInsensitive)) return true;
+    if (ss.contains(QLatin1String("flat_white"), Qt::CaseInsensitive)) return false;
+    return qApp->palette().color(QPalette::Window).lightness() < 128;
+}
+
+void applyLinkPalette() {
+    if (!qApp) return;
+    const QColor accent = discord::accent();
+    QPalette pal = qApp->palette();
+    if (pal.color(QPalette::Link) != accent) {
+        pal.setColor(QPalette::Link, accent);
+        pal.setColor(QPalette::LinkVisited, accent);
+        qApp->setPalette(pal);
+    }
+    // Chat links are drawn from the widget palette, not the app one.
+    for (QWidget* w : QApplication::allWidgets()) {
+        auto* te = qobject_cast<QTextEdit*>(w);
+        if (te && te->objectName() == QLatin1String("ChatTab")) {
+            QPalette wp = te->palette();
+            if (wp.color(QPalette::Link) != accent) {
+                wp.setColor(QPalette::Link, accent);
+                wp.setColor(QPalette::LinkVisited, accent);
+                te->setPalette(wp);
+            }
+        }
+    }
+}
+
+using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+DwmSetWindowAttributeFn dwmSetWindowAttribute() {
+    static DwmSetWindowAttributeFn fn = [] {
+        HMODULE lib = LoadLibraryW(L"dwmapi.dll");
+        if (!lib) return static_cast<DwmSetWindowAttributeFn>(nullptr);
+        return reinterpret_cast<DwmSetWindowAttributeFn>(
+            GetProcAddress(lib, "DwmSetWindowAttribute"));
+    }();
+    return fn;
+}
+
+// Dark caption for every top-level window the client owns, including dialogs
+// that appear after startup. DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Windows 10
+// 2004+ and 19 on older builds; the unused call just fails harmlessly.
+void applyWindowFrame(bool dark) {
+    const auto setAttribute = dwmSetWindowAttribute();
+    if (!setAttribute) return;
+    // The widget is part of the key: Windows reuses HWND values, and a new
+    // dialog must not inherit a stale "already dark" entry.
+    static QHash<quintptr, QPointer<QWidget>> darkened;
+    for (auto it = darkened.begin(); it != darkened.end();) {
+        if (!it.value()) it = darkened.erase(it);
+        else ++it;
+    }
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (!w || !w->isWindow() || !w->isVisible()) continue;
+        const Qt::WindowType type = w->windowType();
+        if (type == Qt::Popup || type == Qt::ToolTip) continue;
+        const quintptr handle = static_cast<quintptr>(w->winId());
+        if (!handle) continue;
+        const bool known = darkened.contains(handle) && darkened.value(handle) == w;
+        if (dark && !known) {
+            BOOL on = TRUE;
+            setAttribute(reinterpret_cast<HWND>(handle), 20, &on, sizeof(on));
+            setAttribute(reinterpret_cast<HWND>(handle), 19, &on, sizeof(on));
+            // Win11 also tints the 1px frame; without this it stays light.
+            const COLORREF border = RGB(0x2A, 0x2D, 0x33);
+            setAttribute(reinterpret_cast<HWND>(handle), 34, &border, sizeof(border));
+            darkened[handle] = w;
+        } else if (!dark && darkened.contains(handle)) {
+            BOOL off = FALSE;
+            setAttribute(reinterpret_cast<HWND>(handle), 20, &off, sizeof(off));
+            setAttribute(reinterpret_cast<HWND>(handle), 19, &off, sizeof(off));
+            const COLORREF fallback = 0xFFFFFFFE;  // DWMWA_COLOR_DEFAULT
+            setAttribute(reinterpret_cast<HWND>(handle), 34, &fallback, sizeof(fallback));
+            darkened.remove(handle);
+        }
+    }
+}
+
+// Dialogs (options, channel editor, ...) are built after startup. Catching
+// their Show event avoids a light caption until the next heartbeat.
+class FrameFilter : public QObject {
+public:
+    explicit FrameFilter(QObject* parent = nullptr) : QObject(parent) {}
+    bool eventFilter(QObject* obj, QEvent* ev) override {
+        if (ev->type() == QEvent::Show && g_darkMode == 1) {
+            auto* w = qobject_cast<QWidget*>(obj);
+            if (w && w->isWindow()) applyWindowFrame(true);
+        }
+        return QObject::eventFilter(obj, ev);
+    }
+};
+
+QPointer<QObject> g_frameFilter;
+
+QString pushButtonStyle(const QColor& bg, const QColor& border, const QColor& text,
+                        const QColor& hoverBg, const QColor& hoverBorder,
+                        const QColor& pressedBg) {
+    return QStringLiteral(
+               "QPushButton { background:%1; border:1px solid %2; border-radius:7px;"
+               " color:%3; font-family:'Microsoft YaHei UI'; font-size:10pt; padding:2px 10px; }"
+               "QPushButton:hover { background:%4; border-color:%5; }"
+               "QPushButton:pressed { background:%6; }")
+        .arg(bg.name(), border.name(), text.name(), hoverBg.name(), hoverBorder.name(),
+             pressedBg.name());
+}
+
+// Repaints every widget the plugin owns. The client's own widgets are handled
+// by the theme's stylesheet, so this only covers our sidebar, user panel, chat
+// overlay, chat header and the info page chrome.
+void applyPluginTheme(bool dark) {
+    discord::setDark(dark);
+
+    if (g_infoBar) {
+        g_infoBar->setStyleSheet(QStringLiteral("background:%1; border-bottom:1px solid %2;")
+                                     .arg(discord::bg().name(), discord::divider().name()));
+    }
+    if (g_infoBack) {
+        g_infoBack->setStyleSheet(pushButtonStyle(discord::input(), discord::divider(),
+                                                  discord::ink(), discord::inputFocus(),
+                                                  discord::muted(), discord::selected()));
+    }
+    if (g_infoTitle) {
+        g_infoTitle->setStyleSheet(
+            QStringLiteral("QLabel { border:none; background:transparent; color:%1;"
+                           " font-family:'Microsoft YaHei UI'; font-size:11pt; font-weight:600; }")
+                .arg(discord::ink().name()));
+    }
+    if (g_infoStatus) {
+        g_infoStatus->setStyleSheet(
+            QStringLiteral("QLabel { background:%1; color:%2; padding:2px 16px 8px 16px;"
+                           " font-family:'Microsoft YaHei UI'; font-size:10pt; }")
+                .arg(discord::bg().name(), discord::muted().name()));
+    }
+    if (g_modernChat) g_modernChat->applyTheme();
+    if (g_chatHeader) g_chatHeader->update();
+    if (g_userPanel) g_userPanel->update();
+    if (g_styledTree) g_styledTree->viewport()->update();
+    applyLinkPalette();
+}
+
 void installInfoTab() {
     if (g_infoPage) return;
     auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"));
@@ -573,30 +727,20 @@ void installInfoTab() {
 
     auto* bar = new QWidget(page);
     bar->setFixedHeight(48);
-    bar->setStyleSheet(QStringLiteral("background:#FFFFFF; border-bottom:1px solid #E3E5E8;"));
     auto* h = new QHBoxLayout(bar);
     h->setContentsMargins(10, 0, 12, 0);
     h->setSpacing(6);
     auto* back = new QPushButton(QStringLiteral("‹ 聊天"), bar);
     back->setCursor(Qt::PointingHandCursor);
     back->setFixedHeight(26);
-    back->setStyleSheet(QStringLiteral(
-        "QPushButton { background:#F2F3F5; border:1px solid #E3E5E8; border-radius:7px;"
-        " color:#313338; font-family:'Microsoft YaHei UI'; font-size:10pt; padding:2px 10px; }"
-        "QPushButton:hover { background:#E7E9EC; border-color:#D5D8DD; }"
-        "QPushButton:pressed { background:#DBDEE1; }"));
     auto* title = new QLabel(QStringLiteral("信息"), bar);
-    title->setStyleSheet(QStringLiteral(
-        "QLabel { border:none; background:transparent; color:#313338;"
-        " font-family:'Microsoft YaHei UI'; font-size:11pt; font-weight:600; }"));
     h->addWidget(back);
     h->addWidget(title, 1);
     v->addWidget(bar);
+    g_infoBar = bar;
+    g_infoBack = back;
 
     auto* status = new QLabel(page);
-    status->setStyleSheet(QStringLiteral(
-        "QLabel { background:#FFFFFF; color:#5C5E66; padding:2px 16px 8px 16px;"
-        " font-family:'Microsoft YaHei UI'; font-size:10pt; }"));
     status->hide();
     v->addWidget(status);
     g_infoStatus = status;
@@ -626,6 +770,9 @@ void installInfoTab() {
     g_chatStack = stack;
     g_infoTitle = title;
     info->show();
+    const bool dark = detectDarkTheme();
+    g_darkMode = dark ? 1 : 0;
+    applyPluginTheme(dark);
     logLine("info pane moved into the chat page area");
 }
 
@@ -1015,27 +1162,7 @@ void installChannelPanel() {
     g_installed = true;
     logLine(QString("native tree styled in %1").arg(widgetPath(pane)));
 
-    if (qApp) {
-        QPalette pal = qApp->palette();
-        const QColor link(0x0F, 0x76, 0x6E);
-        if (pal.color(QPalette::Link) != link) {
-            pal.setColor(QPalette::Link, link);
-            pal.setColor(QPalette::LinkVisited, link);
-            qApp->setPalette(pal);
-        }
-        // Chat links are drawn from the widget palette, not the app one.
-        for (QWidget* w : QApplication::allWidgets()) {
-            auto* te = qobject_cast<QTextEdit*>(w);
-            if (te && te->objectName() == QLatin1String("ChatTab")) {
-                QPalette wp = te->palette();
-                if (wp.color(QPalette::Link) != link) {
-                    wp.setColor(QPalette::Link, link);
-                    wp.setColor(QPalette::LinkVisited, link);
-                    te->setPalette(wp);
-                }
-            }
-        }
-    }
+    applyLinkPalette();
     updateInfoStatus();
     layoutPane();
     if (g_userPanel) g_userPanel->refresh();
@@ -1252,27 +1379,20 @@ void heartbeat() {
         if (g_treeRows) g_treeRows->refresh();
         tree->viewport()->update();
     }
-    if (qApp) {
-        QPalette pal = qApp->palette();
-        const QColor link(0x0F, 0x76, 0x6E);
-        if (pal.color(QPalette::Link) != link) {
-            pal.setColor(QPalette::Link, link);
-            pal.setColor(QPalette::LinkVisited, link);
-            qApp->setPalette(pal);
-        }
-        // Chat links are drawn from the widget palette, not the app one.
-        for (QWidget* w : QApplication::allWidgets()) {
-            auto* te = qobject_cast<QTextEdit*>(w);
-            if (te && te->objectName() == QLatin1String("ChatTab")) {
-                QPalette wp = te->palette();
-                if (wp.color(QPalette::Link) != link) {
-                    wp.setColor(QPalette::Link, link);
-                    wp.setColor(QPalette::LinkVisited, link);
-                    te->setPalette(wp);
-                }
-            }
-        }
+    // A style switch needs a restart, but the first heartbeat after that
+    // restart is where the plugin's own widgets pick up the new palette.
+    const bool darkTheme = detectDarkTheme();
+    const int mode = darkTheme ? 1 : 0;
+    if (mode != g_darkMode) {
+        g_darkMode = mode;
+        applyPluginTheme(darkTheme);
+        logLine(QStringLiteral("theme mode: %1 (stylesheet %2 chars, window %3)")
+                    .arg(darkTheme ? "dark" : "light")
+                    .arg(qApp->styleSheet().size())
+                    .arg(qApp->palette().color(QPalette::Window).name()));
     }
+    applyWindowFrame(darkTheme);
+    applyLinkPalette();
     updateInfoStatus();
     layoutPane();
     refreshClientNames();
@@ -1303,12 +1423,20 @@ void onUiReady() {
     logLine("onUiReady");
     dumpWidgets();
     if (qApp) {
-        QPalette pal = qApp->palette();
-        pal.setColor(QPalette::Link, QColor(0x0F, 0x76, 0x6E));
-        pal.setColor(QPalette::LinkVisited, QColor(0x0F, 0x76, 0x6E));
-        qApp->setPalette(pal);
+        const bool dark = detectDarkTheme();
+        g_darkMode = dark ? 1 : 0;
+        discord::setDark(dark);
+        applyLinkPalette();
+        logLine(QStringLiteral("theme detect: %1 (stylesheet %2 chars, window %3)")
+                    .arg(dark ? "dark" : "light")
+                    .arg(qApp->styleSheet().size())
+                    .arg(qApp->palette().color(QPalette::Window).name()));
     }
     if (!g_guard) g_guard = new QObject(qApp);
+    if (!g_frameFilter) {
+        g_frameFilter = new FrameFilter(qApp);
+        qApp->installEventFilter(g_frameFilter);
+    }
     if (!g_timer) {
         g_timer = new QTimer(qApp);
         g_timer->setInterval(1500);
@@ -1337,7 +1465,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.0.0";
+    return "1.1.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;
@@ -1346,7 +1474,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_author() {
     return "3ku-nanodesu";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_description() {
-    return "Content-first layout, Discord-style channel tree, modern chat bubbles and a user panel for the Flat White theme.";
+    return "Content-first layout, Discord-style channel tree, modern chat bubbles and a user panel for the Flat White and Flat Dark themes.";
 }
 extern "C" __declspec(dllexport) void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
     g_funcs = funcs;
@@ -1379,6 +1507,11 @@ void cleanupUi() {
 
     if (g_stateTimer) { g_stateTimer->stop(); delete g_stateTimer.data(); g_stateTimer = nullptr; }
     if (g_timer) { g_timer->stop(); delete g_timer.data(); g_timer = nullptr; }
+    if (g_frameFilter) {
+        if (qApp) qApp->removeEventFilter(g_frameFilter);
+        delete g_frameFilter.data();
+        g_frameFilter = nullptr;
+    }
     delete g_guard.data();
     g_guard = nullptr;
 
