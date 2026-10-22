@@ -3,11 +3,16 @@
 #include <QEvent>
 #include <QApplication>
 #include <QAbstractItemModel>
+#include <QClipboard>
+#include <QContextMenuEvent>
 #include <QDateTime>
 #include <QFont>
 #include <QFontMetrics>
 #include <QInputDialog>
+#include <QKeyEvent>
+#include <QKeySequence>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -17,10 +22,17 @@
 #include <QSlider>
 #include <QScrollBar>
 #include <QStyle>
+#include <QTextLayout>
+#include <QTextOption>
+#include <QtMath>
 
 #include <functional>
+#include <memory>
+#include <vector>
 
 namespace {
+
+bool g_darkPalette = false;
 
 const QColor kAvatarPalette[] = {
     QColor(0xE0, 0x5B, 0x5B), QColor(0xE0, 0x8B, 0x5B), QColor(0xE0, 0xB3, 0x5B),
@@ -181,6 +193,11 @@ void drawChevron(QPainter& p, const QRectF& r, const QColor& color, bool down) {
 }
 
 }  // namespace
+
+namespace discord {
+void setDark(bool dark) { g_darkPalette = dark; }
+bool isDark() { return g_darkPalette; }
+}  // namespace discord
 
 // ============================================================ ChannelSidebar
 
@@ -496,7 +513,7 @@ void ChannelSidebar::paintEvent(QPaintEvent*) {
         const int left = indent + 30;
 
         // State cluster, right aligned: headset mute, mic mute, away (Zz).
-        const QColor off(0xC2, 0x5A, 0x52);
+        const QColor off = discord::danger();
         int bx = width() - 12;
         if (row.outputMuted) {
             bx -= 15;
@@ -508,7 +525,7 @@ void ChannelSidebar::paintEvent(QPaintEvent*) {
         }
         if (row.away) {
             bx -= 19;
-            drawAwayBadge(p, QRectF(bx, r.center().y() - 7, 18, 15), QColor(0xD9, 0x9A, 0x3D));
+            drawAwayBadge(p, QRectF(bx, r.center().y() - 7, 18, 15), discord::awayColor());
         }
         const int textRight = qMax(left + 24, bx - 4);
         p.drawText(QRect(left, row.y, textRight - left, h), Qt::AlignLeft | Qt::AlignVCenter,
@@ -639,19 +656,19 @@ void UserPanel::setTalking(bool talking) {
 void UserPanel::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.fillRect(rect(), QColor(0xEB, 0xED, 0xEF));
+    p.fillRect(rect(), discord::panel());
     p.setPen(QPen(discord::divider(), 1));
     p.drawLine(0, 0, width(), 0);
 
     const int rowCenter = height() / 2;
-    const QColor off(0xC2, 0x5A, 0x52);
+    const QColor off = discord::danger();
     const QColor idle = discord::faint();
 
     const QRectF av(10, rowCenter - 15, 30, 30);
     drawAvatar(p, av, m_name.isEmpty() ? QStringLiteral("?") : m_name, m_talking, discord::green());
 
-    p.setPen(QPen(QColor(0xEB, 0xED, 0xEF), 2));
-    p.setBrush((m_inputMuted || m_away) ? QColor(0xB0, 0xB4, 0xBA) : discord::green());
+    p.setPen(QPen(discord::panel(), 2));
+    p.setBrush((m_inputMuted || m_away) ? discord::faint() : discord::green());
     p.drawEllipse(QRectF(av.right() - 9, av.bottom() - 9, 9, 9));
 
     QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 10);
@@ -674,7 +691,7 @@ void UserPanel::paintEvent(QPaintEvent*) {
 
     // Toggle icons: away / microphone / speaker.
     const int iconY = rowCenter - 9;
-    drawAwayBadge(p, QRectF(width() - 74, iconY, 18, 18), m_away ? QColor(0xD9, 0x9A, 0x3D) : idle);
+    drawAwayBadge(p, QRectF(width() - 74, iconY, 18, 18), m_away ? discord::awayColor() : idle);
     drawMic(p, QRectF(width() - 52, iconY, 18, 18), m_inputMuted ? off : discord::muted(), m_inputMuted);
     const QRectF hp(width() - 30, iconY, 18, 18);
     if (m_outputMuted) drawSpeakerMutedBadge(p, hp, off);
@@ -1043,7 +1060,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     } else {
         // Online with an open mic: the theme accent, so it reads as "active"
         // long before the green speaking light fires.
-        QColor ident(0x0F, 0x76, 0x6E);
+        QColor ident = discord::accent();
         if (away) ident.setAlpha(150);
         p->setPen(Qt::NoPen);
         p->setBrush(ident);
@@ -1053,7 +1070,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     p->setPen(away ? discord::muted() : discord::ink());
     const int left = r.left() + 27;
 
-    const QColor off(0xC2, 0x5A, 0x52);
+    const QColor off = discord::danger();
     int bx = r.right() - 10;
     if (outMuted) {
         bx -= 15;
@@ -1065,7 +1082,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     }
     if (away) {
         bx -= 19;
-        drawAwayBadge(*p, QRectF(bx, r.center().y() - 7, 18, 15), QColor(0xD9, 0x9A, 0x3D));
+        drawAwayBadge(*p, QRectF(bx, r.center().y() - 7, 18, 15), discord::awayColor());
     }
     const int textRight = qMax(left + 24, bx - 4);
 
@@ -1113,79 +1130,239 @@ enum ChatRole {
     ChatSeverity
 };
 
+constexpr int kChatPad = 14;        // row side margin
+constexpr int kChatBubblePad = 10;  // bubble inner padding, horizontal
+constexpr int kChatBubblePadY = 8;  // bubble inner padding, vertical
+
+QFont chatNameFont() {
+    QFont f(QStringLiteral("Microsoft YaHei UI"), 9);
+    f.setWeight(QFont::DemiBold);
+    return f;
+}
+
+QFont chatTextFont() { return QFont(QStringLiteral("Microsoft YaHei UI"), 10); }
+
+// QTextLayout does not break at '\n', so a message is split into paragraphs
+// first and each paragraph is wrapped on its own.
+struct ChatPara {
+    std::unique_ptr<QTextLayout> layout;
+    int start = 0;   // offset of the paragraph in the full message text
+    int length = 0;
+    qreal top = 0;
+    qreal height = 0;
+};
+
+struct ChatTextGeom {
+    QString text;
+    QFont font;
+    std::vector<ChatPara> paras;
+    qreal maxLineWidth = 0;
+    int height = 0;
+};
+
+ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth) {
+    ChatTextGeom g;
+    g.text = text;
+    g.font = font;
+    if (text.isEmpty()) return g;
+
+    int start = 0;
+    qreal top = 0;
+    for (;;) {
+        const int nl = text.indexOf(QLatin1Char('\n'), start);
+        const int len = (nl < 0 ? text.size() : nl) - start;
+
+        ChatPara para;
+        para.start = start;
+        para.length = len;
+        para.top = top;
+        para.layout.reset(new QTextLayout(text.mid(start, len), font));
+        QTextOption opt;
+        opt.setWrapMode(QTextOption::WordWrap);
+        para.layout->setTextOption(opt);
+        para.layout->beginLayout();
+        qreal y = 0;
+        for (;;) {
+            QTextLine line = para.layout->createLine();
+            if (!line.isValid()) break;
+            line.setLineWidth(qMax(1, wrapWidth));
+            line.setPosition(QPointF(0, y));
+            y += line.height();
+            g.maxLineWidth = qMax(g.maxLineWidth, line.naturalTextWidth());
+        }
+        para.layout->endLayout();
+        // An empty paragraph still occupies one line so blank lines keep
+        // their height.
+        if (para.layout->lineCount() == 0) y = QFontMetricsF(font).height();
+        para.height = y;
+        top += y;
+        g.paras.push_back(std::move(para));
+        if (nl < 0) break;
+        start = nl + 1;
+    }
+    g.height = qCeil(top);
+    return g;
+}
+
+// Character offset (in the message text) at a point given relative to the
+// top-left of the laid-out text.
+int chatTextPosAt(const ChatTextGeom& g, const QPointF& p) {
+    if (g.text.isEmpty() || g.paras.empty()) return 0;
+    if (p.y() <= 0) return 0;
+
+    size_t pi = g.paras.size() - 1;
+    for (size_t i = 0; i < g.paras.size(); ++i) {
+        const ChatPara& para = g.paras[i];
+        if (p.y() < para.top + para.height) {
+            pi = i;
+            break;
+        }
+    }
+    const ChatPara& para = g.paras[pi];
+    if (p.y() >= para.top + para.height) return para.start + para.length;
+
+    const qreal y = p.y() - para.top;
+    int li = para.layout->lineCount() - 1;
+    if (li < 0) return para.start + para.length;
+    for (int i = 0; i < para.layout->lineCount(); ++i) {
+        const QTextLine line = para.layout->lineAt(i);
+        if (y < line.y() + line.height()) {
+            li = i;
+            break;
+        }
+    }
+    const QTextLine line = para.layout->lineAt(li);
+    const int local = qBound(0, line.xToCursor(p.x()), para.length);
+    return para.start + local;
+}
+
+QVector<QRectF> chatSelectionRects(const ChatTextGeom& g, int selStart, int selEnd,
+                                   const QPointF& origin) {
+    QVector<QRectF> rects;
+    if (selEnd <= selStart) return rects;
+    for (const ChatPara& para : g.paras) {
+        const int ps = para.start;
+        const int pe = para.start + para.length;
+        if (pe <= selStart || ps >= selEnd) continue;
+        const int a = qMax(selStart, ps);
+        const int b = qMin(selEnd, pe);
+        if (b <= a) continue;
+        for (int i = 0; i < para.layout->lineCount(); ++i) {
+            const QTextLine line = para.layout->lineAt(i);
+            const int ls = ps + line.textStart();
+            const int le = ls + line.textLength();
+            const int la = qMax(a, ls);
+            const int lb = qMin(b, le);
+            if (lb <= la) continue;
+            qreal x0 = line.cursorToX(la - ps);
+            qreal x1 = line.cursorToX(lb - ps);
+            if (x1 < x0) qSwap(x0, x1);
+            rects.append(QRectF(origin.x() + x0, origin.y() + para.top + line.y(),
+                                x1 - x0, line.height()));
+        }
+    }
+    return rects;
+}
+
+// Everything the delegate and the selection code need to agree on: where the
+// bubble is, where the text sits and how it wraps.
+struct ChatRowGeom {
+    bool valid = false;
+    bool system = false;
+    int height = 30;
+    QRect bubbleRect;
+    QRect textRect;
+    ChatTextGeom textGeom;
+};
+
+ChatRowGeom buildChatRow(int width, const QModelIndex& index) {
+    ChatRowGeom g;
+    if (!index.isValid()) return g;
+    g.valid = true;
+    g.system = index.data(ChatSystem).toBool();
+    if (g.system) {
+        g.height = 30;
+        return g;
+    }
+
+    const bool self = index.data(ChatSelf).toBool();
+    const QString text = index.data(ChatText).toString();
+    const int maxBubble = qMax(120, int(width * 0.76));
+    const int innerMax = qMax(40, maxBubble - 2 * kChatBubblePad);
+    g.textGeom = buildChatText(text, chatTextFont(), innerMax);
+
+    const int innerW = qMin(innerMax, qCeil(g.textGeom.maxLineWidth) + 1);
+    const int bubbleW = qMin(maxBubble, innerW + 2 * kChatBubblePad);
+    const int bubbleH = g.textGeom.height + 2 * kChatBubblePadY;
+    const int nameH = QFontMetrics(chatNameFont()).height();
+    const int bubbleY = 6 + nameH + 4;
+    const int bubbleX = self ? (width - kChatPad - bubbleW) : kChatPad;
+
+    g.bubbleRect = QRect(bubbleX, bubbleY, bubbleW, bubbleH);
+    g.textRect = QRect(bubbleX + kChatBubblePad, bubbleY + kChatBubblePadY,
+                       bubbleW - 2 * kChatBubblePad, bubbleH - 2 * kChatBubblePadY);
+    g.height = bubbleY + bubbleH + 12;
+    return g;
+}
+
+bool chatWordChar(QChar ch) {
+    return ch.isLetterOrNumber() || QStringLiteral("_-./:@#?&=%+").contains(ch);
+}
+
 class ChatBubbleDelegate : public QStyledItemDelegate {
 public:
-    using QStyledItemDelegate::QStyledItemDelegate;
+    explicit ChatBubbleDelegate(ModernChat* view) : m_view(view) {}
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        return QSize(option.rect.width(), heightFor(option.rect.width(), index));
+        int width = option.rect.width();
+        if (width <= 0 && m_view) width = m_view->viewport()->width();
+        const ChatRowGeom row = buildChatRow(width, index);
+        return QSize(qMax(width, 0), row.valid ? row.height : 30);
     }
 
-private:
-    static int heightFor(int width, const QModelIndex& index) {
-        if (index.data(ChatSystem).toBool()) return 30;
-        QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 9);
-        nameFont.setWeight(QFont::DemiBold);
-        QFont textFont(QStringLiteral("Microsoft YaHei UI"), 10);
-        const QFontMetrics afm(nameFont);
-        const QFontMetrics tfm(textFont);
-        const int maxBubble = qMax(120, int(width * 0.76));
-        const QRect bound = tfm.boundingRect(QRect(0, 0, maxBubble - 20, 0), Qt::TextWordWrap,
-                                             index.data(ChatText).toString());
-        return 6 + afm.height() + 4 + bound.height() + 16 + 12;
-    }
-
-public:
     void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
         p->save();
         p->setRenderHint(QPainter::Antialiasing, true);
-        p->fillRect(option.rect, Qt::white);
+        p->fillRect(option.rect, discord::bg());
+
+        const ChatRowGeom row = buildChatRow(option.rect.width(), index);
+        if (!row.valid) {
+            p->restore();
+            return;
+        }
 
         const QString sender = index.data(ChatSender).toString();
         const QString text = index.data(ChatText).toString();
         const QString time = index.data(ChatTime).toString();
         const bool self = index.data(ChatSelf).toBool();
-        const bool system = index.data(ChatSystem).toBool();
 
-        const int width = option.rect.width();
-        const int left = option.rect.left() + 14;
-        const int right = option.rect.right() - 14;
-
-        QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 9);
-        nameFont.setWeight(QFont::DemiBold);
-        QFont timeFont(QStringLiteral("Microsoft YaHei UI"), 7);
-        QFont textFont(QStringLiteral("Microsoft YaHei UI"), 10);
-
-        if (system) {
+        if (row.system) {
             p->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
             const int severity = index.data(ChatSeverity).toInt();
             // Server log errors keep the client's red; warnings amber; our
             // own informational lines stay grey.
-            p->setPen(severity >= 2 ? QColor(0xC2, 0x3B, 0x2E)
-                                    : (severity == 1 ? QColor(0xB0, 0x74, 0x1E)
-                                                     : QColor(0x94, 0x9B, 0xA3)));
+            p->setPen(severity >= 2 ? discord::severityRed()
+                                    : (severity == 1 ? discord::severityAmber()
+                                                     : discord::faint()));
             p->drawText(option.rect.adjusted(0, 0, 0, -8), Qt::AlignHCenter | Qt::AlignBottom,
                         sender.isEmpty() ? text : sender + QStringLiteral("  ") + text);
             p->restore();
             return;
         }
 
-        const QColor ink(0x31, 0x33, 0x38);
-        const QColor faint(0x94, 0x9B, 0xA3);
-        const QColor selfBubble(0xE3, 0xF1, 0xEE);
-        const QColor otherBubble(0xF2, 0xF3, 0xF5);
-        const QColor accent(0x0F, 0x76, 0x6E);
+        const QColor ink = discord::ink();
+        const QColor faint = discord::faint();
+        const QColor selfBubble = discord::bubbleSelf();
+        const QColor otherBubble = discord::bubbleOther();
+        const QColor accent = discord::accent();
 
-        QFontMetrics afm(nameFont);
-        QFontMetrics tfm(textFont);
-        const int maxBubble = qMax(120, int(width * 0.76));
-        const QRect bound = tfm.boundingRect(QRect(0, 0, maxBubble - 20, 0), Qt::TextWordWrap, text);
-        const int bubbleW = qMin(maxBubble, bound.width() + 20);
-        const int bubbleH = bound.height() + 16;
+        const QRect r = option.rect;
+        const int left = r.left() + kChatPad;
+        const int right = r.right() - kChatPad;
+        const QFont nameFont = chatNameFont();
+        const QFontMetrics afm(nameFont);
         const int nameH = afm.height();
-        const int top = option.rect.top() + 6;
-        const int bubbleY = top + nameH + 4;
-        const int bubbleX = self ? (right - bubbleW) : left;
+        const int top = r.top() + 6;
 
         p->setFont(nameFont);
         p->setPen(self ? accent : ink);
@@ -1195,9 +1372,10 @@ public:
         p->drawText(QRect(nameX, top, nameW + 2, nameH), Qt::AlignLeft | Qt::AlignVCenter, display);
 
         if (!time.isEmpty()) {
+            const QFont timeFont(QStringLiteral("Microsoft YaHei UI"), 7);
             p->setFont(timeFont);
             p->setPen(faint);
-            QFontMetrics tfm2(timeFont);
+            const QFontMetrics tfm2(timeFont);
             const int tw = tfm2.horizontalAdvance(time);
             if (self) {
                 p->drawText(QRect(nameX - tw - 8, top, tw, nameH),
@@ -1210,35 +1388,62 @@ public:
 
         p->setPen(Qt::NoPen);
         p->setBrush(self ? selfBubble : otherBubble);
-        p->drawRoundedRect(QRectF(bubbleX, bubbleY, bubbleW, bubbleH), 10, 10);
-        p->setFont(textFont);
+        p->drawRoundedRect(QRectF(row.bubbleRect).translated(r.topLeft()), 10, 10);
+
+        int selA = 0;
+        int selB = 0;
+        if (m_view && m_view->selectionRangeForRow(index.row(), selA, selB)) {
+            const QVector<QRectF> rects =
+                chatSelectionRects(row.textGeom, selA, selB, row.textRect.topLeft() + r.topLeft());
+            QColor highlight = discord::accent();
+            highlight.setAlpha(discord::isDark() ? 90 : 64);
+            p->setBrush(highlight);
+            for (const QRectF& rect : rects) p->drawRect(rect);
+        }
+
         p->setPen(ink);
-        p->drawText(QRect(bubbleX + 10, bubbleY + 8, bubbleW - 20, bubbleH - 16),
-                    Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, text);
+        p->setFont(row.textGeom.font);
+        for (const ChatPara& para : row.textGeom.paras) {
+            if (!para.layout) continue;
+            para.layout->draw(p, QPointF(row.textRect.left() + r.left(),
+                                         row.textRect.top() + para.top + r.top()));
+        }
         p->restore();
     }
+
+private:
+    ModernChat* m_view = nullptr;
 };
 }  // namespace
 
 ModernChat::ModernChat(QWidget* parent) : QListWidget(parent) {
     setItemDelegate(new ChatBubbleDelegate(this));
     setFrameShape(QFrame::NoFrame);
-    setStyleSheet(QStringLiteral(
-        "QListWidget { background:#FFFFFF; border:none; }"
-        "QListWidget::item { border:none; }"
-        "QListWidget::item:selected { background:transparent; }"));
     setSelectionMode(QAbstractItemView::NoSelection);
-    setFocusPolicy(Qt::NoFocus);
+    setFocusPolicy(Qt::ClickFocus);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setUniformItemSizes(false);
     setSpacing(0);
+    viewport()->setCursor(Qt::IBeamCursor);
+    applyTheme();
+}
+
+void ModernChat::applyTheme() {
+    setStyleSheet(QStringLiteral(
+        "QListWidget { background:%1; border:none; }"
+        "QListWidget::item { border:none; }"
+        "QListWidget::item:selected { background:transparent; }")
+        .arg(discord::bg().name()));
+    viewport()->update();
 }
 
 void ModernChat::addMessage(const ChatMessage& msg) {
     // Drop the empty-state hint as soon as the first real message arrives.
-    if (!msg.system && count() == 1 && item(0) && item(0)->data(ChatSystem).toBool())
+    if (!msg.system && count() == 1 && item(0) && item(0)->data(ChatSystem).toBool()) {
         clear();
+        clearTextSelection();
+    }
     auto* sb = verticalScrollBar();
     const bool nearBottom = !sb || (sb->maximum() - sb->value() < 60);
     auto* item = new QListWidgetItem(this);
@@ -1254,8 +1459,251 @@ void ModernChat::addMessage(const ChatMessage& msg) {
 
 void ModernChat::setMessages(const QVector<ChatMessage>& msgs) {
     clear();
+    clearTextSelection();
     for (const ChatMessage& m : msgs) addMessage(m);
     scrollToBottom();
+}
+
+void ModernChat::clearTextSelection() {
+    if (m_selAnchorRow < 0 && m_selCursorRow < 0) return;
+    m_selAnchorRow = m_selCursorRow = -1;
+    m_selAnchorPos = m_selCursorPos = 0;
+    viewport()->update();
+}
+
+QString ModernChat::rowPlainText(int row) const {
+    const QListWidgetItem* it = item(row);
+    if (!it) return QString();
+    const QString text = it->data(ChatText).toString();
+    if (it->data(ChatSystem).toBool()) {
+        const QString sender = it->data(ChatSender).toString();
+        return sender.isEmpty() ? text : sender + QStringLiteral("  ") + text;
+    }
+    return text;
+}
+
+bool ModernChat::selectionRangeForRow(int row, int& start, int& end) const {
+    start = end = 0;
+    if (m_selAnchorRow < 0 || m_selCursorRow < 0) return false;
+    const QListWidgetItem* it = item(row);
+    if (!it || it->data(ChatSystem).toBool()) return false;
+
+    int aRow = m_selAnchorRow;
+    int aPos = m_selAnchorPos;
+    int cRow = m_selCursorRow;
+    int cPos = m_selCursorPos;
+    if (aRow > cRow || (aRow == cRow && aPos > cPos)) {
+        qSwap(aRow, cRow);
+        qSwap(aPos, cPos);
+    }
+    if (row < aRow || row > cRow) return false;
+
+    const int len = it->data(ChatText).toString().size();
+    start = row == aRow ? qBound(0, aPos, len) : 0;
+    end = row == cRow ? qBound(0, cPos, len) : len;
+    return end > start;
+}
+
+ModernChat::TextPos ModernChat::positionAt(const QPoint& viewportPos) const {
+    TextPos p;
+    if (count() == 0) return p;
+
+    QPoint pt = viewportPos;
+    pt.setX(qBound(0, pt.x(), qMax(0, viewport()->width() - 1)));
+    pt.setY(qBound(0, pt.y(), qMax(0, viewport()->height() - 1)));
+
+    const QModelIndex idx = indexAt(pt);
+    int row = -1;
+    if (idx.isValid())
+        row = idx.row();
+    else if (pt.y() < visualItemRect(item(0)).top())
+        row = 0;
+    else
+        row = count() - 1;
+    if (row < 0) return p;
+
+    p.row = row;
+    const ChatRowGeom g = buildChatRow(viewport()->width(), model()->index(row, 0));
+    if (!g.valid || g.system || g.textGeom.text.isEmpty()) return p;
+
+    const QRect rowRect = visualItemRect(item(row));
+    const QPointF local(pt.x() - g.textRect.left(), pt.y() - rowRect.top() - g.textRect.top());
+    p.pos = chatTextPosAt(g.textGeom, local);
+    return p;
+}
+
+void ModernChat::selectTo(const TextPos& p) {
+    if (p.row < 0) return;
+    if (m_selCursorRow == p.row && m_selCursorPos == p.pos) return;
+    m_selCursorRow = p.row;
+    m_selCursorPos = p.pos;
+    viewport()->update();
+}
+
+void ModernChat::mousePressEvent(QMouseEvent* ev) {
+    if (ev->button() != Qt::LeftButton) {
+        QListWidget::mousePressEvent(ev);
+        return;
+    }
+    setFocus(Qt::MouseFocusReason);
+    m_selecting = true;
+    const TextPos p = positionAt(ev->pos());
+    m_selAnchorRow = m_selCursorRow = p.row;
+    m_selAnchorPos = m_selCursorPos = p.pos;
+    viewport()->update();
+    ev->accept();
+}
+
+void ModernChat::mouseMoveEvent(QMouseEvent* ev) {
+    if (!m_selecting || !(ev->buttons() & Qt::LeftButton)) {
+        QListWidget::mouseMoveEvent(ev);
+        return;
+    }
+    const int margin = 24;
+    QScrollBar* sb = verticalScrollBar();
+    if (sb) {
+        if (ev->pos().y() < margin && sb->value() > sb->minimum())
+            sb->setValue(sb->value() - 16);
+        else if (ev->pos().y() > viewport()->height() - margin && sb->value() < sb->maximum())
+            sb->setValue(sb->value() + 16);
+    }
+    selectTo(positionAt(ev->pos()));
+    ev->accept();
+}
+
+void ModernChat::mouseReleaseEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::LeftButton && m_selecting) {
+        m_selecting = false;
+        ev->accept();
+        return;
+    }
+    QListWidget::mouseReleaseEvent(ev);
+}
+
+void ModernChat::mouseDoubleClickEvent(QMouseEvent* ev) {
+    if (ev->button() != Qt::LeftButton) {
+        QListWidget::mouseDoubleClickEvent(ev);
+        return;
+    }
+    const TextPos p = positionAt(ev->pos());
+    if (p.row < 0) return;
+    const QListWidgetItem* it = item(p.row);
+    if (!it || it->data(ChatSystem).toBool()) return;
+
+    const QString text = it->data(ChatText).toString();
+    int a = qBound(0, p.pos, text.size());
+    int b = a;
+    while (a > 0 && chatWordChar(text.at(a - 1))) --a;
+    while (b < text.size() && chatWordChar(text.at(b))) ++b;
+
+    m_selecting = false;
+    m_selAnchorRow = m_selCursorRow = p.row;
+    m_selAnchorPos = a;
+    m_selCursorPos = b;
+    viewport()->update();
+    ev->accept();
+}
+
+void ModernChat::keyPressEvent(QKeyEvent* ev) {
+    const bool ctrlInsert =
+        (ev->key() == Qt::Key_Insert) && (ev->modifiers() & Qt::ControlModifier);
+    if (ev->matches(QKeySequence::Copy) || ctrlInsert) {
+        copySelection();
+        ev->accept();
+        return;
+    }
+    if (ev->matches(QKeySequence::SelectAll)) {
+        selectAllText();
+        ev->accept();
+        return;
+    }
+    if (ev->key() == Qt::Key_Escape) {
+        clearTextSelection();
+        ev->accept();
+        return;
+    }
+    QListWidget::keyPressEvent(ev);
+}
+
+void ModernChat::contextMenuEvent(QContextMenuEvent* ev) {
+    const QPoint vp = viewport()->mapFrom(this, ev->pos());
+    const QModelIndex idx = indexAt(vp);
+    const int row = idx.isValid() ? idx.row() : -1;
+
+    QMenu menu(this);
+    QAction* copyAct = menu.addAction(QStringLiteral("复制"));
+    copyAct->setShortcut(QKeySequence::Copy);
+    copyAct->setEnabled(m_selAnchorRow >= 0 && m_selCursorRow >= 0 &&
+                        (m_selAnchorRow != m_selCursorRow ||
+                         m_selAnchorPos != m_selCursorPos));
+    QAction* copyRowAct = menu.addAction(QStringLiteral("复制这条消息"));
+    copyRowAct->setEnabled(row >= 0 && !item(row)->data(ChatSystem).toBool());
+    QAction* allAct = menu.addAction(QStringLiteral("复制全部"));
+    allAct->setEnabled(count() > 0);
+
+    QAction* chosen = menu.exec(ev->globalPos());
+    if (chosen == copyAct)
+        copySelection();
+    else if (chosen == copyRowAct)
+        copyRow(row);
+    else if (chosen == allAct)
+        copyAll();
+    ev->accept();
+}
+
+void ModernChat::selectAllText() {
+    if (count() == 0) return;
+    m_selAnchorRow = 0;
+    m_selAnchorPos = 0;
+    m_selCursorRow = count() - 1;
+    m_selCursorPos = rowPlainText(m_selCursorRow).size();
+    viewport()->update();
+}
+
+void ModernChat::copySelection() {
+    if (m_selAnchorRow < 0 || m_selCursorRow < 0) return;
+    int aRow = m_selAnchorRow;
+    int aPos = m_selAnchorPos;
+    int cRow = m_selCursorRow;
+    int cPos = m_selCursorPos;
+    if (aRow > cRow || (aRow == cRow && aPos > cPos)) {
+        qSwap(aRow, cRow);
+        qSwap(aPos, cPos);
+    }
+
+    QStringList parts;
+    for (int row = aRow; row <= cRow; ++row) {
+        const QListWidgetItem* it = item(row);
+        if (!it || it->data(ChatSystem).toBool()) continue;
+        const QString text = it->data(ChatText).toString();
+        if (row == aRow && row == cRow) {
+            const int from = qBound(0, aPos, text.size());
+            const int to = qBound(0, cPos, text.size());
+            if (to > from) parts << text.mid(from, to - from);
+        } else if (row == aRow) {
+            parts << text.mid(qBound(0, aPos, text.size()));
+        } else if (row == cRow) {
+            parts << text.left(qBound(0, cPos, text.size()));
+        } else {
+            parts << text;
+        }
+    }
+    const QString out = parts.join(QLatin1Char('\n'));
+    if (!out.isEmpty()) QGuiApplication::clipboard()->setText(out);
+}
+
+void ModernChat::copyRow(int row) {
+    const QString text = rowPlainText(row);
+    if (!text.isEmpty()) QGuiApplication::clipboard()->setText(text);
+}
+
+void ModernChat::copyAll() {
+    QStringList parts;
+    for (int row = 0; row < count(); ++row) {
+        const QString text = rowPlainText(row);
+        if (!text.isEmpty()) parts << text;
+    }
+    if (!parts.isEmpty()) QGuiApplication::clipboard()->setText(parts.join(QLatin1Char('\n')));
 }
 
 void ModernChat::paintEvent(QPaintEvent* ev) {
@@ -1265,7 +1713,7 @@ void ModernChat::paintEvent(QPaintEvent* ev) {
     p.setRenderHint(QPainter::Antialiasing, true);
     QFont f(QStringLiteral("Microsoft YaHei UI"), 10);
     p.setFont(f);
-    p.setPen(QColor(0x94, 0x9B, 0xA3));
+    p.setPen(discord::faint());
     p.drawText(viewport()->rect(), Qt::AlignCenter, m_emptyText);
 }
 
