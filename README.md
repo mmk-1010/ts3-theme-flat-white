@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md)
 
-作者：**3ku-nanodesu**　版本：1.1
+作者：**3ku-nanodesu**　版本：1.2
 
 ![Flat White 与 Flat Dark 界面](assets/theme-preview.png)
 
@@ -25,10 +25,10 @@ Microsoft YaHei UI 9pt，中英混排不跳行高。
 
 | 压缩包 | 内容 |
 | --- | --- |
-| `Flat-White-1.1.zip` | 浅色主题 + 浅色图标 + 插件 + 音效 |
-| `Flat-Dark-1.1.zip` | 深色主题 + 深色图标 + 插件 + 音效 |
+| `Flat-White-1.2.zip` | 浅色主题 + 浅色图标 + 插件 + 音效 |
+| `Flat-Dark-1.2.zip` | 深色主题 + 深色图标 + 插件 + 音效 |
 
-两个包的插件和音效相同；插件负责 Discord 式布局、气泡聊天和深色标题栏。
+两个包的插件和音效相同；插件负责 Discord 式布局、气泡聊天、戳一戳提醒和深色标题栏。
 也可以单独下载主题、图标包、插件或音效包。
 
 ## 安装

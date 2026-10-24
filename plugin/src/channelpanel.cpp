@@ -1797,3 +1797,95 @@ void ChatHeader::paintEvent(QPaintEvent*) {
                    tfm.elidedText(m_topic, Qt::ElideRight, width() - sepX - 24));
     }
 }
+
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr int kToastWidth = 340;
+constexpr int kToastHeight = 72;
+constexpr int kToastMargin = 18;
+// Clear of the menu bar, which stays visible in this layout.
+constexpr int kToastTop = 52;
+}  // namespace
+
+PokeToast::PokeToast(QWidget* parent) : QWidget(parent) {
+    // Rounded corners need the parent's pixels to show through the widget.
+    setAttribute(Qt::WA_NoSystemBackground);
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setFocusPolicy(Qt::NoFocus);
+    setCursor(Qt::PointingHandCursor);
+    setToolTip(QStringLiteral("点击关闭"));
+    setFixedSize(kToastWidth, kToastHeight);
+    hide();
+}
+
+void PokeToast::reposition() {
+    QWidget* host = parentWidget();
+    if (!host) return;
+    move(qMax(kToastMargin, host->width() - width() - kToastMargin), kToastTop);
+}
+
+void PokeToast::showPoke(const QString& poker, const QString& message) {
+    // A second poke while the card is up updates it in place and counts up,
+    // so a burst of pokes never stacks overlapping windows.
+    m_count = isVisible() ? m_count + 1 : 1;
+    m_poker = poker.trimmed();
+    m_message = message.trimmed();
+    reposition();
+    raise();
+    if (!isVisible()) show();
+    update();
+}
+
+void PokeToast::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRectF card = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    const QColor surface = discord::isDark() ? discord::input() : QColor(0xFF, 0xFF, 0xFF);
+    p.setPen(QPen(discord::divider(), 1));
+    p.setBrush(surface);
+    p.drawRoundedRect(card, 10, 10);
+
+    // Accent strip down the left edge, clipped to the rounded card.
+    p.save();
+    QPainterPath clip;
+    clip.addRoundedRect(card, 10, 10);
+    p.setClipPath(clip);
+    p.fillRect(QRectF(card.left(), card.top(), 3, card.height()), discord::accent());
+    p.restore();
+
+    const int left = 18;
+    const int textWidth = width() - left - 14;
+
+    QString title = m_poker.isEmpty() ? QStringLiteral("有人戳了戳你")
+                                      : QStringLiteral("%1 戳了戳你").arg(m_poker);
+    if (m_count > 1) title += QStringLiteral(" ×%1").arg(m_count);
+    QFont titleFont(QStringLiteral("Microsoft YaHei UI"), 10);
+    titleFont.setWeight(QFont::DemiBold);
+    QFont bodyFont(QStringLiteral("Microsoft YaHei UI"), 9);
+    const QFontMetrics titleMetrics(titleFont);
+    const QFontMetrics bodyMetrics(bodyFont);
+    // Centre by the fonts' real heights so a scaled display never clips a line.
+    const int gap = 4;
+    const int top = qMax(10, (height() - (titleMetrics.height() + gap + bodyMetrics.height())) / 2);
+    const QString body = m_message.isEmpty() ? QStringLiteral("没有留言") : m_message;
+
+    p.setFont(titleFont);
+    p.setPen(discord::ink());
+    p.drawText(QRect(left, top, textWidth, titleMetrics.height()),
+               Qt::AlignLeft | Qt::AlignVCenter,
+               titleMetrics.elidedText(title, Qt::ElideRight, textWidth));
+
+    p.setFont(bodyFont);
+    p.setPen(discord::muted());
+    p.drawText(QRect(left, top + titleMetrics.height() + gap, textWidth, bodyMetrics.height()),
+               Qt::AlignLeft | Qt::AlignVCenter,
+               bodyMetrics.elidedText(body, Qt::ElideRight, textWidth));
+}
+
+void PokeToast::mousePressEvent(QMouseEvent* ev) {
+    Q_UNUSED(ev);
+    m_count = 0;
+    hide();
+}

@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | **English**
 
-Author: **3ku-nanodesu**　Version: 1.1
+Author: **3ku-nanodesu**　Version: 1.2
 
 ![Flat White and Flat Dark interfaces](assets/theme-preview.png)
 
@@ -29,12 +29,12 @@ Pick any archive from the [Releases](https://github.com/mmk-1010/ts3-theme-flat-
 
 | Archive | Contents |
 | --- | --- |
-| `Flat-White-1.1.zip` | Light theme + light icons + plugin + sounds |
-| `Flat-Dark-1.1.zip` | Dark theme + dark icons + plugin + sounds |
+| `Flat-White-1.2.zip` | Light theme + light icons + plugin + sounds |
+| `Flat-Dark-1.2.zip` | Dark theme + dark icons + plugin + sounds |
 
 Both archives contain the same plugin and sounds; the plugin provides the Discord-style
-layout, bubble chat and the dark title bar. The theme, icon pack, plugin and sound pack can
-also be downloaded individually.
+layout, bubble chat, poke notifications and the dark title bar. The theme, icon pack, plugin
+and sound pack can also be downloaded individually.
 
 ## Installation
 
