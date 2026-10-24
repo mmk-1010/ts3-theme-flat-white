@@ -1428,6 +1428,11 @@ bool chatWordChar(QChar ch) {
     return ch.isLetterOrNumber() || QStringLiteral("_-./:@#?&=%+").contains(ch);
 }
 
+// How close to the end of the history still counts as "reading the newest".
+// Small enough that one wheel notch up stops the auto-follow, so the reader
+// keeps the position they scrolled to.
+constexpr int kFollowSlack = 24;
+
 class ChatBubbleDelegate : public QStyledItemDelegate {
 public:
     explicit ChatBubbleDelegate(ModernChat* view) : m_view(view) {}
@@ -1546,6 +1551,29 @@ ModernChat::ModernChat(QWidget* parent) : QListWidget(parent) {
     setSpacing(0);
     viewport()->setCursor(Qt::IBeamCursor);
     applyTheme();
+    // The delegate sizes the rows, so the scrollbar range reaches its final
+    // value only a layout after the rows go in - long after setMessages() ran.
+    // Follow the bottom whenever the range grows while the reader sits there;
+    // scrolling away from the bottom drops the flag, so reading back through
+    // the history is not fought every time a message arrives.
+    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int max) {
+        // Same guard: a collapsed pane reports 0..0, and re-pinning there only
+        // destroys the offset that the next real layout should have kept.
+        if (max <= 0 || !m_followBottom) return;
+        verticalScrollBar()->setValue(max);
+    });
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        const QScrollBar* sb = verticalScrollBar();
+        if (!sb) return;
+        // A zero range means "nothing to scroll", not "the reader is at the
+        // bottom". The client shrinks the chat page to 0 height for a frame
+        // while it rebuilds the pane, and treating that as bottom re-armed the
+        // follow flag, so the next real layout yanked the view back down.
+        if (sb->maximum() <= 0) return;
+        m_followBottom = value >= sb->maximum() - kFollowSlack;
+        // Remember the reading position so a pane rebuild can restore it.
+        m_savedOffset = m_followBottom ? -1 : value;
+    });
 }
 
 void ModernChat::applyTheme() {
@@ -1557,6 +1585,42 @@ void ModernChat::applyTheme() {
     viewport()->update();
 }
 
+void ModernChat::scrollToLatest() {
+    if (count() == 0) return;
+    m_followBottom = true;
+    m_savedOffset = -1;
+    // Rows are sized by the delegate, so right after a rebuild the scrollbar
+    // range is still 0 and scrollToBottom() has nothing to scroll to - the
+    // list then sits at the top of the history and addMessage()'s "am I at the
+    // bottom" test stays false forever. Lay the rows out first, and let the
+    // rangeChanged handler catch the case where even that is too early.
+    executeDelayedItemsLayout();
+    if (QScrollBar* sb = verticalScrollBar()) sb->setValue(sb->maximum());
+}
+
+void ModernChat::resizeEvent(QResizeEvent* ev) {
+    QListWidget::resizeEvent(ev);
+    if (m_followBottom) {
+        // A relayout can drop the offset back to the top; re-pin it.
+        scrollToLatest();
+        return;
+    }
+    // The client collapses the page to 0 height for a frame while it rebuilds
+    // the pane, which clamps the offset to 0. Put the reader back where they
+    // were once the real geometry is in place again.
+    if (m_savedOffset < 0 || height() <= 0) return;
+    executeDelayedItemsLayout();
+    QScrollBar* sb = verticalScrollBar();
+    if (!sb || sb->maximum() <= 0) return;
+    const int want = qMin(m_savedOffset, sb->maximum());
+    if (sb->value() != want) sb->setValue(want);
+}
+
+void ModernChat::showEvent(QShowEvent* ev) {
+    QListWidget::showEvent(ev);
+    if (m_followBottom) scrollToLatest();
+}
+
 void ModernChat::addMessage(const ChatMessage& msg) {
     // Drop the empty-state hint as soon as the first real message arrives.
     if (!msg.system && count() == 1 && item(0) && item(0)->data(ChatSystem).toBool()) {
@@ -1564,7 +1628,7 @@ void ModernChat::addMessage(const ChatMessage& msg) {
         clearTextSelection();
     }
     auto* sb = verticalScrollBar();
-    const bool nearBottom = !sb || (sb->maximum() - sb->value() < 60);
+    const int keepValue = sb ? sb->value() : 0;
     auto* item = new QListWidgetItem(this);
     item->setData(ChatSender, msg.sender);
     item->setData(ChatText, msg.text);
@@ -1573,14 +1637,46 @@ void ModernChat::addMessage(const ChatMessage& msg) {
     item->setData(ChatSystem, msg.system);
     item->setData(ChatSeverity, msg.severity);
     item->setFlags(Qt::NoItemFlags);
-    if (nearBottom) scrollToBottom();
+    if (m_filling) return;
+    // m_followBottom, not a fresh maximum-minus-value test: a collapsed pane
+    // reports a zero range, which would read as "at the bottom" and snatch a
+    // reader who is actually scrolled up.
+    if (m_followBottom) {
+        scrollToLatest();
+        return;
+    }
+    // Scroll-per-pixel offsets are recalculated from the cached row heights;
+    // inserting a row can clamp the offset back to the top while the reader is
+    // further down. Re-assert the position it had before the insert.
+    executeDelayedItemsLayout();
+    if (sb && sb->maximum() > 0) sb->setValue(qMin(keepValue, sb->maximum()));
 }
 
-void ModernChat::setMessages(const QVector<ChatMessage>& msgs) {
+void ModernChat::setMessages(const QVector<ChatMessage>& msgs, int keepOffset) {
     clear();
     clearTextSelection();
+    m_filling = true;
     for (const ChatMessage& m : msgs) addMessage(m);
-    scrollToBottom();
+    m_filling = false;
+    // Switching back to a conversation the reader had scrolled up in must not
+    // yank the view: -1 means "was at the bottom", anything else is the pixel
+    // offset to restore. The rows have to be laid out before the offset means
+    // anything, and the stored offset can be past the end of a shorter list.
+    if (keepOffset < 0) {
+        scrollToLatest();
+        return;
+    }
+    executeDelayedItemsLayout();
+    QScrollBar* sb = verticalScrollBar();
+    if (!sb) return;
+    sb->setValue(qMin(keepOffset, sb->maximum()));
+    m_followBottom = sb->value() >= sb->maximum() - kFollowSlack;
+    m_savedOffset = keepOffset;
+}
+
+int ModernChat::scrollOffset() const {
+    const QScrollBar* sb = verticalScrollBar();
+    return sb ? sb->value() : 0;
 }
 
 void ModernChat::clearTextSelection() {

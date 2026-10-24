@@ -94,6 +94,10 @@ QPointer<QTabWidget> g_chatTab;
 QPointer<QObject> g_chatFilter;
 QPointer<QWidget> g_chatLog;
 QHash<QString, QVector<ChatMessage>> g_chatHistory;
+// Scroll offset per conversation; -1 means the reader was at the bottom.
+// Kept across tab switches (and the client's own page flips) so coming back to
+// a conversation does not jump.
+QHash<QString, int> g_chatScroll;
 QString g_overlayKey;
 // Conversation the visible notification card belongs to. Cleared as soon as
 // the card is dismissed, so a later tab change cannot hide a newer card.
@@ -1220,6 +1224,10 @@ void updateChatOverlay() {
     if (!g_modernChat->isVisible()) g_modernChat->show();
 
     if (g_overlayKey != key) {
+        // Remember where the conversation being left was scrolled to.
+        if (!g_overlayKey.isEmpty())
+            g_chatScroll[g_overlayKey] =
+                g_modernChat->isFollowingBottom() ? -1 : g_modernChat->scrollOffset();
         g_overlayKey = key;
         QVector<ChatMessage> messages = g_chatHistory.value(key);
         if (privateTab && messages.isEmpty()) {
@@ -1235,7 +1243,7 @@ void updateChatOverlay() {
         }
         g_modernChat->setEmptyText(serverTab ? QStringLiteral("暂无服务器事件")
                                              : QStringLiteral("这里还没有消息，来打个招呼吧"));
-        g_modernChat->setMessages(messages);
+        g_modernChat->setMessages(messages, g_chatScroll.value(key, -1));
     }
 }
 

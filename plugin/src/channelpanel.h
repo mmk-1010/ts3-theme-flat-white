@@ -229,7 +229,11 @@ class ModernChat : public QListWidget {
 public:
     explicit ModernChat(QWidget* parent = nullptr);
     void addMessage(const ChatMessage& msg);
-    void setMessages(const QVector<ChatMessage>& msgs);
+    // Rebuilds the list. keepOffset < 0 puts the newest message in view;
+    // otherwise the view is restored to that pixel offset.
+    void setMessages(const QVector<ChatMessage>& msgs, int keepOffset = -1);
+    int scrollOffset() const;
+    bool isFollowingBottom() const { return m_followBottom; }
     void setEmptyText(const QString& text) { m_emptyText = text; }
     // Re-reads the palette; called when the client switches between the light
     // and dark stylesheets at runtime.
@@ -242,6 +246,8 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* ev) override;
+    void resizeEvent(QResizeEvent* ev) override;
+    void showEvent(QShowEvent* ev) override;
     void mousePressEvent(QMouseEvent* ev) override;
     void mouseMoveEvent(QMouseEvent* ev) override;
     void mouseReleaseEvent(QMouseEvent* ev) override;
@@ -254,6 +260,7 @@ private:
         int row = -1;
         int pos = 0;
     };
+    void scrollToLatest();
     TextPos positionAt(const QPoint& viewportPos) const;
     void selectTo(const TextPos& p);
     void clearTextSelection();
@@ -267,6 +274,15 @@ private:
     int m_selCursorRow = -1;
     int m_selCursorPos = 0;
     bool m_selecting = false;
+    // True while the reader is at the bottom; the scrollbar's rangeChanged
+    // handler uses it to keep the newest row in view after a rebuild.
+    bool m_followBottom = false;
+    // Reading position to restore after the client collapses and rebuilds the
+    // chat page; -1 while following the bottom.
+    int m_savedOffset = -1;
+    // Set while setMessages() fills the list, so the per-row scroll fixups in
+    // addMessage() do not run once per row.
+    bool m_filling = false;
     QString m_emptyText = QStringLiteral("这里还没有消息，来打个招呼吧");
 };
 
