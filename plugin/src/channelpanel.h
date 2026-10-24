@@ -9,6 +9,8 @@
 
 #include <QColor>
 #include <QHash>
+#include <QPoint>
+#include <QRectF>
 #include <QSet>
 #include <QString>
 #include <QVector>
@@ -141,8 +143,16 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void leaveEvent(QEvent*) override;
+    bool event(QEvent*) override;
 
 private:
+    // All three toggles sit on one 24px grid; painting and hit testing both go
+    // through buttonRect so they cannot drift apart.
+    QRectF buttonRect(int index) const;
+    int buttonAt(const QPoint& pos) const;
+    bool buttonActive(int index) const;
 
     TS3Functions m_funcs{};
     QString m_name;
@@ -152,6 +162,7 @@ private:
     bool m_talking = false;
     qint64 m_talkStamp = 0;
     qint64 m_selfStamp = 0;
+    int m_hover = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -284,24 +295,31 @@ private:
 
 // ---------------------------------------------------------------------------
 
-// Transient card shown inside the client window when someone pokes you. Lives
+// Card shown inside the client window for pokes and incoming messages. Lives
 // as a direct child of MainWindow, so it floats above the chat pane on every
-// tab without joining any layout and without taking keyboard focus. It stays
-// up until the user clicks it.
-class PokeToast : public QWidget {
+// tab without joining any layout and without taking keyboard focus. A repeated
+// title updates the card in place and counts up. It stays until clicked; that
+// click is what opens the conversation.
+class NotifyToast : public QWidget {
 public:
-    explicit PokeToast(QWidget* parent = nullptr);
+    explicit NotifyToast(QWidget* parent = nullptr);
 
-    void showPoke(const QString& poker, const QString& message);
+    void showNotice(const QString& title, const QString& body);
+    // Hides without running onActivate; used when the conversation is opened
+    // by other means (tab switch).
+    void dismiss();
     void reposition();
+
+    // Runs on click, before the card is hidden.
+    std::function<void()> onActivate;
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
 
 private:
-    QString m_poker;
-    QString m_message;
+    QString m_title;
+    QString m_body;
     int m_count = 0;
 };
 
