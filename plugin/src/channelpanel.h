@@ -282,4 +282,27 @@ private:
     QString m_topic;
 };
 
+// ---------------------------------------------------------------------------
+
+// Transient card shown inside the client window when someone pokes you. Lives
+// as a direct child of MainWindow, so it floats above the chat pane on every
+// tab without joining any layout and without taking keyboard focus. It stays
+// up until the user clicks it.
+class PokeToast : public QWidget {
+public:
+    explicit PokeToast(QWidget* parent = nullptr);
+
+    void showPoke(const QString& poker, const QString& message);
+    void reposition();
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+
+private:
+    QString m_poker;
+    QString m_message;
+    int m_count = 0;
+};
+
 

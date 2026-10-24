@@ -87,6 +87,7 @@ QPointer<QSplitter> g_infoSplitter;
 QPointer<QTreeView> g_infoTree;
 QMetaObject::Connection g_infoConn;
 QPointer<ModernChat> g_modernChat;
+QPointer<PokeToast> g_pokeToast;
 QPointer<QTabWidget> g_chatTab;
 QPointer<QObject> g_chatFilter;
 QPointer<QWidget> g_chatLog;
@@ -695,6 +696,7 @@ void applyPluginTheme(bool dark) {
                 .arg(discord::bg().name(), discord::muted().name()));
     }
     if (g_modernChat) g_modernChat->applyTheme();
+    if (g_pokeToast) g_pokeToast->update();
     if (g_chatHeader) g_chatHeader->update();
     if (g_userPanel) g_userPanel->update();
     if (g_styledTree) g_styledTree->viewport()->update();
@@ -880,6 +882,27 @@ void queueSystemMessage(uint64 schid, const QString& text) {
     if (!qApp || !g_guard) return;
     QMetaObject::invokeMethod(g_guard, [schid, text] { appendSystemMessage(schid, text); },
                               Qt::QueuedConnection);
+}
+
+// The card is parented to MainWindow rather than to a chat tab, so it stays
+// visible on every tab and moves with the window. A client rebuild of the main
+// window replaces it on the next poke.
+void showPokeToast(const QString& poker, const QString& message) {
+    if (!qApp) return;
+    QWidget* host = nullptr;
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (w && w->isWindow() &&
+            QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow")) {
+            host = w;
+            break;
+        }
+    }
+    if (!host) return;
+    if (!g_pokeToast || g_pokeToast->parentWidget() != host) {
+        if (g_pokeToast) delete g_pokeToast.data();
+        g_pokeToast = new PokeToast(host);
+    }
+    g_pokeToast->showPoke(poker, message);
 }
 
 // Incoming private messages carry the sender's display name, but the chat tab
@@ -1465,7 +1488,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.1.0";
+    return "1.2.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;
@@ -1474,7 +1497,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_author() {
     return "3ku-nanodesu";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_description() {
-    return "Content-first layout, Discord-style channel tree, modern chat bubbles and a user panel for the Flat White and Flat Dark themes.";
+    return "Content-first layout, Discord-style channel tree, modern chat bubbles, a user panel, poke notifications and light/dark theme support for the Flat White and Flat Dark themes.";
 }
 extern "C" __declspec(dllexport) void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
     g_funcs = funcs;
@@ -1523,6 +1546,7 @@ void cleanupUi() {
         g_chatFilter = nullptr;
     }
     if (g_modernChat) { delete g_modernChat.data(); g_modernChat = nullptr; }
+    if (g_pokeToast) { delete g_pokeToast.data(); g_pokeToast = nullptr; }
     g_chatLog = nullptr;
     g_chatTab = nullptr;
     g_infoShown = false;
@@ -1791,23 +1815,27 @@ extern "C" __declspec(dllexport) void ts3plugin_onServerPermissionErrorEvent(
 extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
     uint64 serverConnectionHandlerID, anyID fromClientID, const char* pokerName,
     const char* pokerUniqueIdentity, const char* message, int ffIgnored) {
-    Q_UNUSED(fromClientID);
     Q_UNUSED(pokerUniqueIdentity);
     Q_UNUSED(ffIgnored);
     if (!qApp || !g_guard) return;
+    const QString rawName =
+        (pokerName && *pokerName) ? QString::fromUtf8(pokerName).trimmed() : QString();
+    const QString text = (message && *message) ? QString::fromUtf8(message).trimmed() : QString();
     logLine(QStringLiteral("poke raw from=%1 name=%2: %3")
                 .arg(fromClientID)
-                .arg(pokerName ? QString::fromUtf8(pokerName) : QStringLiteral("?"),
-                     message ? QString::fromUtf8(message) : QString()));
-    QString name = (pokerName && *pokerName) ? QString::fromUtf8(pokerName) : QStringLiteral("有人");
-    const QString text = (message && *message) ? QString::fromUtf8(message) : QString();
-    const QString line = text.isEmpty() ? QStringLiteral("%1 戳了戳你").arg(name)
-                                        : QStringLiteral("%1 戳了戳你：%2").arg(name, text);
+                .arg(rawName.isEmpty() ? QStringLiteral("?") : rawName, text));
     // Pokes belong to the server tab; when that tab is not the one on screen,
     // surface the poke in whichever chat overlay is visible so it cannot be
-    // missed.
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, line] {
+    // missed. The toast covers the case where no chat surface is on screen.
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, fromClientID, rawName, text] {
+        QString name = rawName;
+        if (name.isEmpty()) name = clientNameById(serverConnectionHandlerID, fromClientID);
+        const QString shown = name.isEmpty() ? QStringLiteral("有人") : name;
+        const QString line = text.isEmpty()
+                                 ? QStringLiteral("%1 戳了戳你").arg(shown)
+                                 : QStringLiteral("%1 戳了戳你：%2").arg(shown, text);
         appendSystemMessage(serverConnectionHandlerID, line, 2);
+        showPokeToast(name, text);
         if (g_modernChat && g_modernChat->isVisible() && !g_overlayKey.isEmpty() &&
             g_overlayKey != serverKey(serverConnectionHandlerID)) {
             ChatMessage msg;
