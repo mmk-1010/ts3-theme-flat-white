@@ -14,10 +14,12 @@
 #include <QFile>
 #include <QFont>
 #include <QHeaderView>
+#include <QIcon>
 #include <QMouseEvent>
 #include <QMetaObject>
 #include <QPainter>
 #include <QPalette>
+#include <QPixmap>
 #include <QPointer>
 #include <QSplitter>
 #include <QTabWidget>
@@ -87,12 +89,17 @@ QPointer<QSplitter> g_infoSplitter;
 QPointer<QTreeView> g_infoTree;
 QMetaObject::Connection g_infoConn;
 QPointer<ModernChat> g_modernChat;
-QPointer<PokeToast> g_pokeToast;
+QPointer<NotifyToast> g_notifyToast;
 QPointer<QTabWidget> g_chatTab;
 QPointer<QObject> g_chatFilter;
 QPointer<QWidget> g_chatLog;
 QHash<QString, QVector<ChatMessage>> g_chatHistory;
 QString g_overlayKey;
+// Conversation the visible notification card belongs to. Cleared as soon as
+// the card is dismissed, so a later tab change cannot hide a newer card.
+QString g_notifyKey;
+anyID g_notifyMode = 0;
+QString g_notifyTabName;
 bool g_infoShown = false;
 QMetaObject::Connection g_chatTabConn;
 QPointer<QTreeView> g_styledTree;
@@ -105,6 +112,8 @@ bool g_firstPaintDone = false;
 int g_darkMode = -1;
 
 void openPrivateChat(unsigned short clientId, const QString& name);
+void openNotificationTarget(uint64 schid, anyID targetMode, anyID clientId,
+                            const QString& tabName);
 
 // Keeps the custom sidebar covering the stock tree pane without taking part in
 // its layout, so the tree keeps valid geometry for synthetic events.
@@ -696,7 +705,7 @@ void applyPluginTheme(bool dark) {
                 .arg(discord::bg().name(), discord::muted().name()));
     }
     if (g_modernChat) g_modernChat->applyTheme();
-    if (g_pokeToast) g_pokeToast->update();
+    if (g_notifyToast) g_notifyToast->update();
     if (g_chatHeader) g_chatHeader->update();
     if (g_userPanel) g_userPanel->update();
     if (g_styledTree) g_styledTree->viewport()->update();
@@ -884,25 +893,193 @@ void queueSystemMessage(uint64 schid, const QString& text) {
                               Qt::QueuedConnection);
 }
 
-// The card is parented to MainWindow rather than to a chat tab, so it stays
-// visible on every tab and moves with the window. A client rebuild of the main
-// window replaces it on the next poke.
-void showPokeToast(const QString& poker, const QString& message) {
-    if (!qApp) return;
-    QWidget* host = nullptr;
+// MainWindow hosts all floating plugin UI. Re-found on every use: the client
+// can rebuild its main window, which invalidates the old pointer.
+QWidget* mainWindowHost() {
     for (QWidget* w : QApplication::topLevelWidgets()) {
         if (w && w->isWindow() &&
-            QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow")) {
-            host = w;
-            break;
-        }
+            QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow"))
+            return w;
     }
+    return nullptr;
+}
+
+// The card is parented to MainWindow rather than to a chat tab, so it stays
+// visible on every tab and moves with the window. A client rebuild of the main
+// window replaces it on the next notification. The card is permanent: its
+// click opens the conversation (onActivate) and then dismisses it.
+void showToast(const QString& title, const QString& body,
+               std::function<void()> onActivate = {}) {
+    if (!qApp) return;
+    QWidget* host = mainWindowHost();
     if (!host) return;
-    if (!g_pokeToast || g_pokeToast->parentWidget() != host) {
-        if (g_pokeToast) delete g_pokeToast.data();
-        g_pokeToast = new PokeToast(host);
+    if (!g_notifyToast || g_notifyToast->parentWidget() != host) {
+        if (g_notifyToast) delete g_notifyToast.data();
+        g_notifyToast = new NotifyToast(host);
     }
-    g_pokeToast->showPoke(poker, message);
+    g_notifyToast->onActivate = onActivate;
+    g_notifyToast->showNotice(title, body);
+}
+
+void clearNotifyTarget() {
+    g_notifyKey.clear();
+    g_notifyTabName.clear();
+    g_notifyMode = 0;
+}
+
+void showPokeToast(uint64 schid, const QString& poker, const QString& message) {
+    // A poke is not a conversation event; it stays until clicked.
+    clearNotifyTarget();
+    const QString title = poker.isEmpty() ? QStringLiteral("有人戳了戳你")
+                                          : QStringLiteral("%1 戳了戳你").arg(poker);
+    showToast(title, message.isEmpty() ? QStringLiteral("没有留言") : message,
+              [schid] {
+                  openNotificationTarget(schid, TextMessageTarget_SERVER, 0, QString());
+              });
+}
+
+// The client ships its sound packs under <install>/sound. Prefer the Flat
+// White pack when it is installed, otherwise the stock pack, so the cue
+// follows the theme without depending on the Notifications option page.
+QString notificationSoundPath() {
+    if (!g_funcs.getAppPath) return QString();
+    char buf[1024] = {};
+    g_funcs.getAppPath(buf, sizeof(buf) - 1);
+    const QDir base(QString::fromUtf8(buf));
+    const char* candidates[] = {
+        "sound/flatwhite/chat_message_inbound.wav",
+        "sound/default/chat_message_inbound.wav",
+    };
+    for (const char* rel : candidates) {
+        const QString path = base.filePath(QString::fromLatin1(rel));
+        if (QFile::exists(path)) return path;
+    }
+    return QString();
+}
+
+void playNotificationSound(uint64 schid) {
+    // A bot posting a burst of lines should not machine-gun the same chime.
+    static qint64 lastPlayed = 0;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - lastPlayed < 1200) return;
+    lastPlayed = now;
+    const QString path = notificationSoundPath();
+    if (!path.isEmpty() && g_funcs.playWaveFile && schid) {
+        const unsigned int error = g_funcs.playWaveFile(schid, path.toUtf8().constData());
+        logLine(QStringLiteral("notify sound: %1 (error=%2)").arg(path).arg(error));
+        if (error == ERROR_ok) return;
+    }
+    // Missing pack or refused playback: still give an audible cue.
+    MessageBeep(MB_ICONASTERISK);
+}
+
+// Red dot on the chat tab whose conversation received something the user has
+// not looked at yet. The stylesheet's tab colours veto the client's own unread
+// colour, so the plugin draws the marker itself.
+int chatTabIndexForName(const QString& name) {
+    if (!g_chatTab || name.isEmpty()) return -1;
+    for (int i = 1; i < g_chatTab->count(); ++i) {
+        const QString tab = g_chatTab->tabText(i).trimmed();
+        if (tab.compare(name, Qt::CaseInsensitive) == 0) return i;
+    }
+    for (int i = 1; i < g_chatTab->count(); ++i) {
+        const QString tab = g_chatTab->tabText(i).trimmed();
+        if (tab.isEmpty()) continue;
+        if (tab.contains(name, Qt::CaseInsensitive) || name.contains(tab, Qt::CaseInsensitive))
+            return i;
+    }
+    return -1;
+}
+
+QIcon unreadDotIcon() {
+    static QIcon icon;
+    if (icon.isNull()) {
+        QPixmap pm(16, 16);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(discord::danger());
+        p.drawEllipse(QRectF(4, 4, 8, 8));
+        icon = QIcon(pm);
+    }
+    return icon;
+}
+
+void markUnread(const QString& name) {
+    if (!g_chatTab) return;
+    const int index = chatTabIndexForName(name);
+    if (index < 0 || index == g_chatTab->currentIndex()) return;
+    g_chatTab->setTabIcon(index, unreadDotIcon());
+}
+
+void focusMainWindow() {
+    QWidget* host = mainWindowHost();
+    if (!host) return;
+    if (host->isMinimized()) host->showNormal();
+    host->raise();
+    host->activateWindow();
+}
+
+// Clicking a card opens the conversation behind it: select the tab that owns
+// the conversation, create a private tab through the client's own double-click
+// handler when none exists, and bring the client forward.
+void openNotificationTarget(uint64 schid, anyID targetMode, anyID clientId,
+                            const QString& tabName) {
+    const uint64 current = g_funcs.getCurrentServerConnectionHandlerID
+                               ? g_funcs.getCurrentServerConnectionHandlerID()
+                               : 0;
+    if (schid && current && schid != current) {
+        logLine(QStringLiteral("notify click: conversation on another server (%1)").arg(schid));
+        focusMainWindow();
+        return;
+    }
+    if (!g_chatTab) {
+        if (auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"))) g_chatTab = tw;
+    }
+    int index = -1;
+    if (targetMode == TextMessageTarget_SERVER) {
+        index = (g_chatTab && g_chatTab->count() > 0) ? 0 : -1;
+    } else if (!tabName.isEmpty()) {
+        index = chatTabIndexForName(tabName);
+    }
+    if (index >= 0) {
+        g_chatTab->setCurrentIndex(index);
+    } else if (targetMode == TextMessageTarget_CLIENT && clientId && !tabName.isEmpty()) {
+        // No tab yet: replay the client's double-click on that member row so
+        // the client creates and selects the private chat itself.
+        openPrivateChat(static_cast<unsigned short>(clientId), tabName);
+    }
+    logLine(QStringLiteral("notify click: mode=%1 tab=%2 index=%3")
+                .arg(targetMode)
+                .arg(tabName.isEmpty() ? QStringLiteral("-") : tabName)
+                .arg(index));
+    focusMainWindow();
+}
+
+// Sound and taskbar flash for every incoming message. The card and the unread
+// dot are only added when the conversation is not the one already on screen.
+void notifyIncoming(uint64 schid, anyID targetMode, anyID clientId,
+                    const QString& title, const QString& body,
+                    const QString& tabName, const QString& chatKey, bool showCard) {
+    if (showCard) {
+        g_notifyKey = chatKey;
+        g_notifyTabName = tabName;
+        g_notifyMode = targetMode;
+        showToast(title, body, [schid, targetMode, clientId, tabName] {
+            clearNotifyTarget();
+            openNotificationTarget(schid, targetMode, clientId, tabName);
+        });
+        markUnread(tabName);
+    }
+    playNotificationSound(schid);
+    QWidget* host = mainWindowHost();
+    const bool alert = host && (!host->isActiveWindow() || host->isMinimized());
+    if (alert) QApplication::alert(host, 0);
+    logLine(QStringLiteral("notify: %1 | tab=%2 | card=%3 | taskbar=%4")
+                .arg(title, tabName.isEmpty() ? QStringLiteral("-") : tabName,
+                     showCard ? QStringLiteral("on") : QStringLiteral("off"),
+                     alert ? QStringLiteral("flash") : QStringLiteral("skip")));
 }
 
 // Incoming private messages carry the sender's display name, but the chat tab
@@ -935,8 +1112,34 @@ void updateChatOverlay() {
         auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"));
         if (!tw) return;
         g_chatTab = tw;
-        g_chatTabConn = QObject::connect(tw, &QTabWidget::currentChanged, tw, [](int) {
+        g_chatTabConn = QObject::connect(tw, &QTabWidget::currentChanged, tw, [](int index) {
+            // Opening a conversation is what clears its unread marker.
+            if (g_chatTab && index >= 0 && !g_chatTab->tabIcon(index).isNull())
+                g_chatTab->setTabIcon(index, QIcon());
+            const QString before = g_overlayKey;
             updateChatOverlay();
+            // Manually opening the conversation behind a card dismisses it. A
+            // card that arrived while the user was already on that tab stays;
+            // there was no switch. Private tabs may decorate the peer name, so
+            // the tab text is compared as well as the history key.
+            const QString tab = (g_chatTab && index >= 0)
+                                    ? g_chatTab->tabText(index).trimmed() : QString();
+            uint64 chSchid = 0, chId = 0;
+            QString chName;
+            currentChannelInfo(chSchid, chId, chName);
+            const bool nonPrivateTab = index == 0 || (!chName.isEmpty() && tab == chName);
+            const bool samePrivate =
+                !nonPrivateTab && g_notifyMode == TextMessageTarget_CLIENT &&
+                !g_notifyTabName.isEmpty() && !tab.isEmpty() &&
+                (tab.compare(g_notifyTabName, Qt::CaseInsensitive) == 0 ||
+                 tab.contains(g_notifyTabName, Qt::CaseInsensitive) ||
+                 g_notifyTabName.contains(tab, Qt::CaseInsensitive));
+            const bool targetOpen =
+                (!g_notifyKey.isEmpty() && g_overlayKey == g_notifyKey) || samePrivate;
+            if (g_overlayKey != before && targetOpen) {
+                clearNotifyTarget();
+                if (g_notifyToast) g_notifyToast->dismiss();
+            }
         });
     }
     if (!g_modernChat) {
@@ -1110,13 +1313,29 @@ void layoutPane() {
     if (!g_userPanel || !g_userPanelHost || !g_paneTree) return;
     const int h = g_userPanel->sizeHint().height();
     QWidget* pane = g_userPanelHost;
-    const QRect treeRect(0, 0, pane->width(), qMax(0, pane->height() - h));
-    const QRect panelRect(0, qMax(0, pane->height() - h), pane->width(), h);
+    // The user card floats over the bottom of the list. Bottom padding on the
+    // viewport keeps the last rows scrollable clear of it while the card sits
+    // over the empty band. Re-applied here because a theme switch reloads the
+    // stylesheet and would drop an append done at install time.
+    if (qApp && qApp->styleSheet().indexOf(QLatin1String("ServerTreeView { padding-bottom")) < 0) {
+        qApp->setStyleSheet(qApp->styleSheet() +
+                            QStringLiteral("\nQTreeView#ServerTreeView { padding-bottom: 64px; }\n"));
+    }
+    // The tree keeps the full pane height so the card floats over its rows
+    // instead of sitting in a reserved strip.
+    const QRect treeRect = pane->rect();
+    // Keep the native scrollbar outside the card and clickable.
+    int scrollbar = 0;
+    if (QScrollBar* sb = g_paneTree->verticalScrollBar(); sb && sb->isVisible())
+        scrollbar = sb->width();
+    const QRect panelRect(0, qMax(0, pane->height() - h),
+                          qMax(0, pane->width() - scrollbar), h);
     // Unconditional setGeometry on every heartbeat forced a relayout pass and
     // flickered the widgets above it, including the chat input.
     if (g_paneTree->geometry() != treeRect) g_paneTree->setGeometry(treeRect);
     if (g_userPanel->geometry() != panelRect) g_userPanel->setGeometry(panelRect);
     if (!g_userPanel->isVisible()) g_userPanel->show();
+    g_userPanel->raise();
 }
 
 void installChannelPanel() {
@@ -1488,7 +1707,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.2.0";
+    return "1.3.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;
@@ -1546,7 +1765,7 @@ void cleanupUi() {
         g_chatFilter = nullptr;
     }
     if (g_modernChat) { delete g_modernChat.data(); g_modernChat = nullptr; }
-    if (g_pokeToast) { delete g_pokeToast.data(); g_pokeToast = nullptr; }
+    if (g_notifyToast) { delete g_notifyToast.data(); g_notifyToast = nullptr; }
     g_chatLog = nullptr;
     g_chatTab = nullptr;
     g_infoShown = false;
@@ -1835,7 +2054,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
                                  ? QStringLiteral("%1 戳了戳你").arg(shown)
                                  : QStringLiteral("%1 戳了戳你：%2").arg(shown, text);
         appendSystemMessage(serverConnectionHandlerID, line, 2);
-        showPokeToast(name, text);
+        showPokeToast(serverConnectionHandlerID, name, text);
         if (g_modernChat && g_modernChat->isVisible() && !g_overlayKey.isEmpty() &&
             g_overlayKey != serverKey(serverConnectionHandlerID)) {
             ChatMessage msg;
@@ -1872,6 +2091,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onTextMessageEvent(
             g_funcs.getClientID(serverConnectionHandlerID, &self);
         const bool isSelf = (self && self == fromID);
         QString key;
+        uint64 msgChannelId = 0;
         if (targetMode == TextMessageTarget_CHANNEL) {
             // Channel events arrive with toID == 0, so derive the channel from
             // the sender; that is also the channel the open tab is keyed on.
@@ -1885,6 +2105,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onTextMessageEvent(
                 if (currentChannelInfo(schid, cur, chName) && schid == serverConnectionHandlerID)
                     chId = cur;
             }
+            msgChannelId = chId;
             key = QString::number(serverConnectionHandlerID) + QLatin1Char(':') + QString::number(chId);
         } else if (targetMode == TextMessageTarget_SERVER) {
             key = serverKey(serverConnectionHandlerID);
@@ -1908,5 +2129,28 @@ extern "C" __declspec(dllexport) void ts3plugin_onTextMessageEvent(
         msg.self = isSelf;
         g_chatHistory[key].append(msg);
         if (g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
+        if (isSelf) return;
+
+        // The overlay only paints the conversation currently on screen. If the
+        // message belongs to that visible conversation, skip the card entirely:
+        // the sound and (when the window is in the background) the taskbar
+        // flash are enough. Other conversations still get a card.
+        const bool visible = (g_overlayKey == key) && g_modernChat && g_modernChat->isVisible();
+
+        QString title;
+        QString tabName;
+        if (targetMode == TextMessageTarget_CHANNEL) {
+            const QString channelName = channelNameById(serverConnectionHandlerID, msgChannelId);
+            tabName = channelName;
+            title = channelName.isEmpty() ? QStringLiteral("%1 发来频道消息").arg(name)
+                                          : QStringLiteral("%1 · #%2").arg(name, channelName);
+        } else if (targetMode == TextMessageTarget_CLIENT) {
+            tabName = key.startsWith(QStringLiteral("p:")) ? key.mid(2) : name;
+            title = QStringLiteral("%1 · 私聊").arg(name);
+        } else {
+            title = QStringLiteral("%1 · 服务器消息").arg(name);
+        }
+        notifyIncoming(serverConnectionHandlerID, targetMode, fromID, title, text, tabName, key,
+                       !visible);
     }, Qt::QueuedConnection);
 }

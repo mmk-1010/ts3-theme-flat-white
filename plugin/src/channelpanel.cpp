@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QFont>
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -24,6 +25,7 @@
 #include <QStyle>
 #include <QTextLayout>
 #include <QTextOption>
+#include <QToolTip>
 #include <QtMath>
 
 #include <functional>
@@ -71,24 +73,34 @@ void drawAvatar(QPainter& p, const QRectF& rect, const QString& name, bool ring,
     p.restore();
 }
 
-// Discord-style speaker icon for voice channels.
-void drawSpeaker(QPainter& p, const QRectF& r, const QColor& color) {
+// One diagonal slash shared by the muted mic and speaker, so both states use
+// the same angle and cap style.
+void drawSlash(QPainter& p, const QRectF& r, const QColor& color) {
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(color, 1.6, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(QPointF(r.left() + 2.5, r.bottom() - 2.5),
+               QPointF(r.right() - 2.5, r.top() + 2.5));
+}
+
+// Outline speaker for the user-panel toggle: same 1.5px weight as the mic and
+// the moon so the three controls read as one set. Muted reuses the shared slash.
+void drawSpeaker(QPainter& p, const QRectF& r, const QColor& color, bool muted) {
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(Qt::NoPen);
-    p.setBrush(color);
+    p.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    const qreal cy = r.center().y();
     QPainterPath body;
-    body.moveTo(r.left() + 1, r.center().y() - 2.5);
-    body.lineTo(r.left() + 3.5, r.center().y() - 2.5);
-    body.lineTo(r.left() + 7, r.top() + 2);
-    body.lineTo(r.left() + 7, r.bottom() - 2);
-    body.lineTo(r.left() + 3.5, r.center().y() + 2.5);
-    body.lineTo(r.left() + 1, r.center().y() + 2.5);
+    body.moveTo(r.left() + 2, cy - 2.2);
+    body.lineTo(r.left() + 4.6, cy - 2.2);
+    body.lineTo(r.left() + 7.6, r.top() + 3.2);
+    body.lineTo(r.left() + 7.6, r.bottom() - 3.2);
+    body.lineTo(r.left() + 4.6, cy + 2.2);
+    body.lineTo(r.left() + 2, cy + 2.2);
     body.closeSubpath();
     p.drawPath(body);
-    p.setBrush(Qt::NoBrush);
-    p.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawArc(QRectF(r.left() + 5, r.top() + 3, 7, r.height() - 6), -60 * 16, 120 * 16);
+    p.drawArc(QRectF(r.left() + 8.2, r.top() + 4.4, 5.6, 7.2), -55 * 16, 110 * 16);
+    if (muted) drawSlash(p, r, color);
     p.restore();
 }
 
@@ -106,18 +118,14 @@ void drawLock(QPainter& p, const QRectF& r, const QColor& color) {
 void drawMic(QPainter& p, const QRectF& r, const QColor& color, bool muted) {
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    QPen pen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    QPen pen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
     p.setPen(pen);
     p.setBrush(Qt::NoBrush);
     const qreal cx = r.center().x();
     p.drawRoundedRect(QRectF(cx - 2.2, r.top() + 2, 4.4, 7), 2.2, 2.2);
     p.drawArc(QRectF(cx - 4.8, r.top() + 4, 9.6, 7.2), 0, -180 * 16);
     p.drawLine(QPointF(cx, r.top() + 11.2), QPointF(cx, r.bottom() - 2));
-    if (muted) {
-        p.setPen(QPen(color, 1.6, Qt::SolidLine, Qt::RoundCap));
-        p.drawLine(QPointF(r.left() + 2, r.bottom() - 2),
-                   QPointF(r.right() - 2, r.top() + 2));
-    }
+    if (muted) drawSlash(p, r, color);
     p.restore();
 }
 
@@ -172,6 +180,22 @@ void drawAwayBadge(QPainter& p, const QRectF& r, const QColor& color) {
     QPainterPath i;
     i.addEllipse(outer.translated(outer.width() * 0.42, -outer.height() * 0.2));
     p.fillPath(o.subtracted(i), color);
+    p.restore();
+}
+
+// Outline crescent for the user-panel toggle, same stroke weight as the mic and
+// speaker. The visible mass sits left of the circle centre, so it is nudged
+// right by about a pixel to look centred next to the other two glyphs.
+void drawAwayOutline(QPainter& p, const QRectF& r, const QColor& color) {
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath outer;
+    outer.addEllipse(QRectF(r.left() + 3.1, r.top() + 2, 12, 12));
+    QPainterPath inner;
+    inner.addEllipse(QRectF(r.left() + 8.1, r.top() + 0.8, 12, 12));
+    p.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(outer.subtracted(inner));
     p.restore();
 }
 
@@ -490,7 +514,7 @@ void ChannelSidebar::paintEvent(QPaintEvent*) {
                 p.setBrush(discord::selected());
                 p.drawRoundedRect(r.adjusted(6, 1, -6, -1), 4, 4);
             }
-            drawSpeaker(p, QRectF(indent, r.center().y() - 8, 17, 16), discord::muted());
+            drawSpeaker(p, QRectF(indent, r.center().y() - 8, 17, 16), discord::muted(), false);
             p.setFont(rowFont);
             p.setPen(discord::ink());
             const QFontMetrics fm(rowFont);
@@ -603,7 +627,43 @@ void ChannelSidebar::mouseDoubleClickEvent(QMouseEvent* e) {
 
 // ================================================================ UserPanel
 
-UserPanel::UserPanel(QWidget* parent) : QWidget(parent) {}
+namespace {
+// The user strip is a floating card, not a full-width bar: 6px on every
+// side, matching the 6px inset of the channel-row highlight cards and the
+// bottom gap. 10px of padding inside for the avatar and the button group.
+// Painting and hit testing share these numbers.
+constexpr int kUserCardInsetX = 6;
+constexpr int kUserCardInsetY = 6;
+constexpr int kUserCardRadius = 8;
+constexpr int kUserPad = 10;
+constexpr int kUserBtnSize = 24;
+constexpr int kUserBtnGap = 2;
+}  // namespace
+
+UserPanel::UserPanel(QWidget* parent) : QWidget(parent) { setMouseTracking(true); }
+
+// 24px buttons, 2px gaps, and 10px of padding inside the rounded card.
+// Returns integer-aligned rects so the 16px glyphs land on the pixel grid.
+QRectF UserPanel::buttonRect(int index) const {
+    const int group = 3 * kUserBtnSize + 2 * kUserBtnGap;
+    const int left = width() - kUserCardInsetX - kUserPad - group +
+                     index * (kUserBtnSize + kUserBtnGap);
+    const int top = (height() - kUserBtnSize) / 2;
+    return QRectF(left, top, kUserBtnSize, kUserBtnSize);
+}
+
+int UserPanel::buttonAt(const QPoint& pos) const {
+    for (int i = 0; i < 3; ++i) {
+        if (buttonRect(i).contains(QPointF(pos))) return i;
+    }
+    return -1;
+}
+
+bool UserPanel::buttonActive(int index) const {
+    if (index == 0) return m_away;
+    if (index == 1) return m_inputMuted;
+    return m_outputMuted;
+}
 
 void UserPanel::refresh() {
     if (!m_funcs.getCurrentServerConnectionHandlerID) return;
@@ -656,18 +716,20 @@ void UserPanel::setTalking(bool talking) {
 void UserPanel::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.fillRect(rect(), discord::panel());
+    // Floating rounded card; the widget itself stays transparent around it so
+    // the sidebar bottom shows through instead of a hard full-width strip.
+    const QRectF card = QRectF(rect()).adjusted(kUserCardInsetX, kUserCardInsetY,
+                                                -kUserCardInsetX, -kUserCardInsetY);
     p.setPen(QPen(discord::divider(), 1));
-    p.drawLine(0, 0, width(), 0);
+    p.setBrush(discord::input());
+    p.drawRoundedRect(card, kUserCardRadius, kUserCardRadius);
 
     const int rowCenter = height() / 2;
-    const QColor off = discord::danger();
-    const QColor idle = discord::faint();
 
-    const QRectF av(10, rowCenter - 15, 30, 30);
+    const QRectF av(kUserCardInsetX + kUserPad, rowCenter - 15, 30, 30);
     drawAvatar(p, av, m_name.isEmpty() ? QStringLiteral("?") : m_name, m_talking, discord::green());
 
-    p.setPen(QPen(discord::panel(), 2));
+    p.setPen(QPen(discord::input(), 2));
     p.setBrush((m_inputMuted || m_away) ? discord::faint() : discord::green());
     p.drawEllipse(QRectF(av.right() - 9, av.bottom() - 9, 9, 9));
 
@@ -677,9 +739,11 @@ void UserPanel::paintEvent(QPaintEvent*) {
     p.setPen(m_away ? discord::muted() : discord::ink());
     const QFontMetrics fm(nameFont);
     const QString displayName = m_name.isEmpty() ? QStringLiteral("未连接") : m_name;
-    const int nameRight = width() - 84;
-    p.drawText(QRect(48, rowCenter - 16, nameRight - 48, 18), Qt::AlignLeft | Qt::AlignVCenter,
-               fm.elidedText(displayName, Qt::ElideRight, nameRight - 48));
+    const int nameLeft = kUserCardInsetX + kUserPad + 30 + 8;
+    const int nameRight = static_cast<int>(buttonRect(0).left()) - 8;
+    p.drawText(QRect(nameLeft, rowCenter - 16, nameRight - nameLeft, 18),
+               Qt::AlignLeft | Qt::AlignVCenter,
+               fm.elidedText(displayName, Qt::ElideRight, nameRight - nameLeft));
     p.setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 8));
     p.setPen(discord::faint());
     QString state = QStringLiteral("在线");
@@ -687,42 +751,97 @@ void UserPanel::paintEvent(QPaintEvent*) {
     else if (m_away) state = QStringLiteral("离开");
     else if (m_outputMuted) state = QStringLiteral("耳机静音");
     else if (m_inputMuted) state = QStringLiteral("麦克风静音");
-    p.drawText(QRect(48, rowCenter + 2, nameRight - 48, 13), Qt::AlignLeft | Qt::AlignVCenter, state);
+    p.drawText(QRect(nameLeft, rowCenter + 2, nameRight - nameLeft, 13),
+               Qt::AlignLeft | Qt::AlignVCenter, state);
 
-    // Toggle icons: away / microphone / speaker.
-    const int iconY = rowCenter - 9;
-    drawAwayBadge(p, QRectF(width() - 74, iconY, 18, 18), m_away ? discord::awayColor() : idle);
-    drawMic(p, QRectF(width() - 52, iconY, 18, 18), m_inputMuted ? off : discord::muted(), m_inputMuted);
-    const QRectF hp(width() - 30, iconY, 18, 18);
-    if (m_outputMuted) drawSpeakerMutedBadge(p, hp, off);
-    else drawSpeaker(p, hp, discord::muted());
+    // Toggle buttons: away / microphone / speaker on one 24px grid. Idle
+    // glyphs are all the same 1.5px outline; a tinted 24px chip marks the
+    // active state and a neutral chip marks hover.
+    for (int i = 0; i < 3; ++i) {
+        const QRectF btn = buttonRect(i);
+        const bool active = buttonActive(i);
+        const QColor tint = i == 0 ? discord::awayColor() : discord::danger();
+        if (active) {
+            QColor bg = tint;
+            bg.setAlpha(36);
+            p.setPen(Qt::NoPen);
+            p.setBrush(bg);
+            p.drawRoundedRect(btn, 6, 6);
+        } else if (m_hover == i) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(discord::selected());
+            p.drawRoundedRect(btn, 6, 6);
+        }
+        const QRectF icon(btn.left() + 4, btn.top() + 4, 16, 16);
+        const QColor color = active ? tint : discord::muted();
+        if (i == 0)
+            drawAwayOutline(p, icon, color);
+        else if (i == 1)
+            drawMic(p, icon, color, m_inputMuted);
+        else
+            drawSpeaker(p, icon, color, m_outputMuted);
+    }
 }
 
 void UserPanel::mousePressEvent(QMouseEvent* e) {
+    if (e->button() != Qt::LeftButton) return;
+    const int button = buttonAt(e->pos());
+    if (button < 0) return;
     if (!m_funcs.getCurrentServerConnectionHandlerID || !m_funcs.setClientSelfVariableAsInt) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
     if (!h) return;
-    const int x = e->pos().x();
-    const int right = width();
-    if (x >= right - 80 && x < right - 56) {
+    if (button == 0) {
         m_away = !m_away;
         m_funcs.setClientSelfVariableAsInt(h, CLIENT_AWAY, m_away ? AWAY_ZZZ : AWAY_NONE);
-    } else if (x >= right - 56 && x < right - 32) {
+    } else if (button == 1) {
         m_inputMuted = !m_inputMuted;
         m_funcs.setClientSelfVariableAsInt(h, CLIENT_INPUT_MUTED,
                                           m_inputMuted ? MUTEINPUT_MUTED : MUTEINPUT_NONE);
-    } else if (x >= right - 32 && x < right - 8) {
+    } else {
         m_outputMuted = !m_outputMuted;
         m_funcs.setClientSelfVariableAsInt(h, CLIENT_OUTPUT_MUTED,
                                           m_outputMuted ? MUTEOUTPUT_MUTED : MUTEOUTPUT_NONE);
-    } else {
-        return;
     }
     if (m_funcs.flushClientSelfUpdates) m_funcs.flushClientSelfUpdates(h, nullptr);
     // Our own toggle is authoritative for a moment: the 1.5s poll would
     // otherwise paint the pre-toggle state back.
     m_selfStamp = QDateTime::currentMSecsSinceEpoch();
     update();
+}
+
+void UserPanel::mouseMoveEvent(QMouseEvent* e) {
+    const int hover = buttonAt(e->pos());
+    if (hover == m_hover) return;
+    m_hover = hover;
+    if (hover >= 0) setCursor(Qt::PointingHandCursor);
+    else unsetCursor();
+    update();
+}
+
+void UserPanel::leaveEvent(QEvent*) {
+    if (m_hover < 0) return;
+    m_hover = -1;
+    unsetCursor();
+    update();
+}
+
+bool UserPanel::event(QEvent* e) {
+    if (e->type() == QEvent::ToolTip) {
+        auto* help = static_cast<QHelpEvent*>(e);
+        const int button = buttonAt(help->pos());
+        if (button < 0) {
+            QToolTip::hideText();
+            return true;
+        }
+        static const char* const onText[] = {"设为离开", "静音麦克风", "静音耳机"};
+        static const char* const offText[] = {"取消离开", "取消麦克风静音", "取消耳机静音"};
+        QToolTip::showText(help->globalPos(),
+                           QString::fromUtf8(buttonActive(button) ? offText[button]
+                                                                  : onText[button]),
+                           this);
+        return true;
+    }
+    return QWidget::event(e);
 }
 
 // ============================================================ NativeTreeRows
@@ -1030,7 +1149,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     p->setFont(rowFont);
 
     if (kind == Channel) {
-        drawSpeaker(*p, QRectF(r.left() + 4, r.center().y() - 8, 17, 16), discord::muted());
+        drawSpeaker(*p, QRectF(r.left() + 4, r.center().y() - 8, 17, 16), discord::muted(), false);
         p->setPen(discord::ink());
         const int left = r.left() + 26;
         const int right = r.right() - 26;
@@ -1808,7 +1927,7 @@ constexpr int kToastMargin = 18;
 constexpr int kToastTop = 52;
 }  // namespace
 
-PokeToast::PokeToast(QWidget* parent) : QWidget(parent) {
+NotifyToast::NotifyToast(QWidget* parent) : QWidget(parent) {
     // Rounded corners need the parent's pixels to show through the widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
@@ -1819,25 +1938,31 @@ PokeToast::PokeToast(QWidget* parent) : QWidget(parent) {
     hide();
 }
 
-void PokeToast::reposition() {
+void NotifyToast::reposition() {
     QWidget* host = parentWidget();
     if (!host) return;
     move(qMax(kToastMargin, host->width() - width() - kToastMargin), kToastTop);
 }
 
-void PokeToast::showPoke(const QString& poker, const QString& message) {
-    // A second poke while the card is up updates it in place and counts up,
-    // so a burst of pokes never stacks overlapping windows.
-    m_count = isVisible() ? m_count + 1 : 1;
-    m_poker = poker.trimmed();
-    m_message = message.trimmed();
+void NotifyToast::showNotice(const QString& title, const QString& body) {
+    // A second event while the card is up updates it in place and counts up,
+    // so a burst of pokes or messages never stacks overlapping cards.
+    const QString cleanTitle = title.trimmed();
+    m_count = (isVisible() && cleanTitle == m_title) ? m_count + 1 : 1;
+    m_title = cleanTitle;
+    m_body = body.trimmed();
     reposition();
     raise();
     if (!isVisible()) show();
     update();
 }
 
-void PokeToast::paintEvent(QPaintEvent*) {
+void NotifyToast::dismiss() {
+    m_count = 0;
+    hide();
+}
+
+void NotifyToast::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
 
@@ -1858,8 +1983,7 @@ void PokeToast::paintEvent(QPaintEvent*) {
     const int left = 18;
     const int textWidth = width() - left - 14;
 
-    QString title = m_poker.isEmpty() ? QStringLiteral("有人戳了戳你")
-                                      : QStringLiteral("%1 戳了戳你").arg(m_poker);
+    QString title = m_title.isEmpty() ? QStringLiteral("新消息") : m_title;
     if (m_count > 1) title += QStringLiteral(" ×%1").arg(m_count);
     QFont titleFont(QStringLiteral("Microsoft YaHei UI"), 10);
     titleFont.setWeight(QFont::DemiBold);
@@ -1869,7 +1993,7 @@ void PokeToast::paintEvent(QPaintEvent*) {
     // Centre by the fonts' real heights so a scaled display never clips a line.
     const int gap = 4;
     const int top = qMax(10, (height() - (titleMetrics.height() + gap + bodyMetrics.height())) / 2);
-    const QString body = m_message.isEmpty() ? QStringLiteral("没有留言") : m_message;
+    const QString body = m_body.isEmpty() ? QStringLiteral("没有留言") : m_body;
 
     p.setFont(titleFont);
     p.setPen(discord::ink());
@@ -1884,8 +2008,9 @@ void PokeToast::paintEvent(QPaintEvent*) {
                bodyMetrics.elidedText(body, Qt::ElideRight, textWidth));
 }
 
-void PokeToast::mousePressEvent(QMouseEvent* ev) {
+void NotifyToast::mousePressEvent(QMouseEvent* ev) {
     Q_UNUSED(ev);
-    m_count = 0;
-    hide();
+    auto action = onActivate;
+    dismiss();
+    if (action) action();
 }

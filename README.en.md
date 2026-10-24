@@ -2,9 +2,26 @@
 
 [简体中文](README.md) | **English**
 
-Author: **3ku-nanodesu**　Version: 1.2
+Author: **3ku-nanodesu**　Version: 1.3
 
 ![Flat White and Flat Dark interfaces](assets/theme-preview.png)
+
+## New in 1.3
+
+- **Complete message alerts**: a card appears in the top-right corner for messages in
+  other channels, private chats and the server. It is paired with a notification sound,
+  a flashing taskbar entry and a red dot on the matching chat tab.
+- **Alerts follow the conversation**: the card no longer disappears on its own. Clicking
+  it opens the conversation; switching to that channel or private-chat tab manually also
+  dismisses it, so it never covers a chat you are already reading.
+- **No card for the chat you are reading**: messages in the channel or private chat already
+  on screen only play the notification sound; the taskbar still flashes when the client is
+  in the background.
+- **Floating user card**: the bottom user strip is now a rounded card floating over the
+  channel list, and the away / microphone / headset buttons share one 1.5px outline style
+  with a soft tinted background when active.
+- The unread dots, dark title bar, bubble chat and poke alerts all carry over, with both
+  the light and dark themes updated together.
 
 ## Style
 
@@ -29,12 +46,15 @@ Pick any archive from the [Releases](https://github.com/mmk-1010/ts3-theme-flat-
 
 | Archive | Contents |
 | --- | --- |
-| `Flat-White-1.2.zip` | Light theme + light icons + plugin + sounds |
-| `Flat-Dark-1.2.zip` | Dark theme + dark icons + plugin + sounds |
+| `Flat-White-1.3.zip` | Light theme + light icons + plugin + sounds |
+| `Flat-Dark-1.3.zip` | Dark theme + dark icons + plugin + sounds |
 
 Both archives contain the same plugin and sounds; the plugin provides the Discord-style
-layout, bubble chat, poke notifications and the dark title bar. The theme, icon pack, plugin
-and sound pack can also be downloaded individually.
+layout, bubble chat, message and poke alerts, the floating user card and the dark title bar.
+The theme, icon pack, plugin and sound pack can also be downloaded individually.
+
+Notification sounds prefer the Flat White Sounds pack when it is installed and fall back to
+the client's default pack; the away / microphone / headset buttons do not depend on it.
 
 ## Installation
 
