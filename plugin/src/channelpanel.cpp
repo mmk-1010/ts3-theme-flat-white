@@ -718,10 +718,12 @@ void UserPanel::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing, true);
     // Floating rounded card; the widget itself stays transparent around it so
     // the sidebar bottom shows through instead of a hard full-width strip.
-    const QRectF card = QRectF(rect()).adjusted(kUserCardInsetX, kUserCardInsetY,
-                                                -kUserCardInsetX, -kUserCardInsetY);
-    p.setPen(QPen(discord::divider(), 1));
-    p.setBrush(discord::input());
+    // The half-pixel offset keeps the hairline border crisp.
+    const QRectF card = QRectF(rect()).adjusted(kUserCardInsetX + 0.5, kUserCardInsetY + 0.5,
+                                                -kUserCardInsetX - 0.5, -kUserCardInsetY - 0.5);
+    const QColor fill = discord::card();
+    p.setPen(QPen(discord::cardEdge(), 1));
+    p.setBrush(fill);
     p.drawRoundedRect(card, kUserCardRadius, kUserCardRadius);
 
     const int rowCenter = height() / 2;
@@ -729,7 +731,7 @@ void UserPanel::paintEvent(QPaintEvent*) {
     const QRectF av(kUserCardInsetX + kUserPad, rowCenter - 15, 30, 30);
     drawAvatar(p, av, m_name.isEmpty() ? QStringLiteral("?") : m_name, m_talking, discord::green());
 
-    p.setPen(QPen(discord::input(), 2));
+    p.setPen(QPen(fill, 2));
     p.setBrush((m_inputMuted || m_away) ? discord::faint() : discord::green());
     p.drawEllipse(QRectF(av.right() - 9, av.bottom() - 9, 9, 9));
 
@@ -2063,9 +2065,8 @@ void NotifyToast::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing, true);
 
     const QRectF card = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-    const QColor surface = discord::isDark() ? discord::input() : QColor(0xFF, 0xFF, 0xFF);
-    p.setPen(QPen(discord::divider(), 1));
-    p.setBrush(surface);
+    p.setPen(QPen(discord::cardEdge(), 1));
+    p.setBrush(discord::card());
     p.drawRoundedRect(card, 10, 10);
 
     // Accent strip down the left edge, clipped to the rounded card.

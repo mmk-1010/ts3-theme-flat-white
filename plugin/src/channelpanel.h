@@ -44,6 +44,11 @@ inline QColor accent() { return isDark() ? QColor(0x2D, 0xD4, 0xBF) : QColor(0x0
 inline QColor danger() { return isDark() ? QColor(0xE0, 0x6C, 0x64) : QColor(0xC2, 0x5A, 0x52); }
 inline QColor awayColor() { return isDark() ? QColor(0xE3, 0xB3, 0x41) : QColor(0xD9, 0x9A, 0x3D); }
 inline QColor input() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
+// Floating cards (user strip, notification toast) sit on the channel tree,
+// whose light fill is exactly input(); a card using it would have no surface
+// contrast there, so cards get the white page surface and their own edge.
+inline QColor card() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xFF, 0xFF, 0xFF); }
+inline QColor cardEdge() { return isDark() ? QColor(0x2A, 0x2D, 0x33) : QColor(0xDC, 0xE0, 0xE5); }
 inline QColor inputFocus() { return isDark() ? QColor(0x2B, 0x2F, 0x36) : QColor(0xEB, 0xED, 0xEF); }
 inline QColor bubbleSelf() { return isDark() ? QColor(0x10, 0x32, 0x2D) : QColor(0xE3, 0xF1, 0xEE); }
 inline QColor bubbleOther() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
