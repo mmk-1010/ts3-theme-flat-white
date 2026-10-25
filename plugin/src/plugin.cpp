@@ -333,12 +333,59 @@ void restoreLayout();
 // vertical stacks tree over info in a single left rail. Only the two
 // orientations and their sizes change - no widgets are reparented, so tab
 // switching and shutdown stay safe.
-// Fixed window geometry: the splitter ratios are tuned for this size, so the
-// window is pinned rather than remembered.
-constexpr int kWindowWidth = 940;
-constexpr int kWindowHeight = 901;
+//
+// The window resizes freely. These ratio constants are the design at
+// 940x901; every resize scales both panes with the window, so the split
+// never drifts from the arrangement it was tuned for.
+constexpr int kDesignWidth = 940;
+constexpr int kDesignContentHeight = 804;  // 901 minus menubar/toolbar/statusbar
 constexpr int kSidebarWidth = 420;
 constexpr int kTreeHeight = 439;
+constexpr double kSidebarRatio = double(kSidebarWidth) / double(kDesignWidth);
+constexpr double kMembersRatio = 220.0 / double(kDesignWidth);
+constexpr double kTreeRatio = double(kTreeHeight) / double(kDesignContentHeight);
+constexpr int kMinWindowWidth = 720;
+constexpr int kMinWindowHeight = 560;
+
+QList<int> sidebarSizes(int total, int count) {
+    const int sidebar = qMax(1, qRound(total * kSidebarRatio));
+    if (count >= 3) {
+        const int members = qMax(1, qRound(total * kMembersRatio));
+        return {sidebar, qMax(1, total - sidebar - members), members};
+    }
+    return {sidebar, qMax(1, total - sidebar)};
+}
+
+QList<int> treeSizes(int height) {
+    if (g_infoPage) return {1, 0};
+    const int treeH = qBound(120, qRound(height * kTreeRatio), qMax(120, height - 160));
+    return {treeH, height - treeH};
+}
+
+// The divider belongs to the skin, not the user: disable the handles so a
+// stray drag cannot change the proportions. The widgets stay laid out, and
+// QSplitter::setSizes still works programmatically.
+void lockSplitter(QSplitter* splitter) {
+    if (!splitter) return;
+    for (int i = 1; i < splitter->count(); ++i) {
+        QSplitterHandle* handle = splitter->handle(i);
+        if (!handle) continue;
+        handle->setEnabled(false);
+        handle->setFocusPolicy(Qt::NoFocus);
+        handle->setCursor(Qt::ArrowCursor);
+    }
+}
+
+void unlockSplitter(QSplitter* splitter) {
+    if (!splitter) return;
+    for (int i = 1; i < splitter->count(); ++i) {
+        QSplitterHandle* handle = splitter->handle(i);
+        if (!handle) continue;
+        handle->setEnabled(true);
+        handle->setCursor(splitter->orientation() == Qt::Horizontal ? Qt::SplitHCursor
+                                                                   : Qt::SplitVCursor);
+    }
+}
 
 void applyLayout() {
     if (g_layoutApplied) return;
@@ -361,23 +408,20 @@ void applyLayout() {
     outer->setOrientation(Qt::Horizontal);
     inner->setOrientation(Qt::Vertical);
 
-    const int total = outer->width() > 0 ? outer->width() : kWindowWidth;
-    const int sidebar = qMin(kSidebarWidth, qMax(1, total - 460));
-    if (outer->count() >= 3) {
-        const int members = 220;
-        outer->setSizes({sidebar, qMax(420, total - sidebar - members), members});
-    } else {
-        outer->setSizes({sidebar, qMax(440, total - sidebar)});
-    }
+    const int total = outer->width() > 0 ? outer->width() : kDesignWidth;
+    const QList<int> columns = sidebarSizes(total, outer->count());
+    outer->setSizes(columns);
 
-    const int height = inner->height() > 0 ? inner->height() : kWindowHeight;
-    const int treeH = qMin(kTreeHeight, qMax(120, height - 160));
-    if (g_infoPage && inner->count() >= 2) inner->setSizes({1, 0});
-    else inner->setSizes({treeH, height - treeH});
+    const int height = inner->height() > 0 ? inner->height() : kDesignContentHeight;
+    const QList<int> rows = treeSizes(height);
+    inner->setSizes(rows);
+
+    lockSplitter(outer);
+    lockSplitter(inner);
 
     g_layoutApplied = true;
     logLine(QString("layout applied: content-first (%1x%2), sidebar %3, tree/info %4/%5")
-                .arg(total).arg(height).arg(sidebar).arg(treeH).arg(height - treeH));
+                .arg(total).arg(height).arg(columns.value(0)).arg(rows.value(0)).arg(height - rows.value(0)));
 }
 
 // Below this width the rail plus a usable chat column do not fit, so the
@@ -404,41 +448,32 @@ void updateLayout() {
     }
 }
 
-// Re-apply the pinned sidebar width / tree height, e.g. after the window was
-// resized to the fixed geometry and Qt redistributed the splitter space.
+// Re-apply the ratio split, e.g. after the window was resized and Qt
+// redistributed the splitter space. The handles are locked as well, because a
+// tab switch or reconnect can rebuild the splitters.
 void pinSplitterSizes() {
     if (!g_layoutApplied) return;
     if (g_saved.outer) {
         const int total = g_saved.outer->width();
-        if (total > 0) {
-            const int sidebar = qMin(kSidebarWidth, qMax(1, total - 460));
-            if (g_saved.outer->count() >= 3) {
-                const int members = 220;
-                g_saved.outer->setSizes({sidebar, qMax(420, total - sidebar - members), members});
-            } else {
-                g_saved.outer->setSizes({sidebar, qMax(440, total - sidebar)});
-            }
-        }
+        if (total > 0) g_saved.outer->setSizes(sidebarSizes(total, g_saved.outer->count()));
+        lockSplitter(g_saved.outer);
     }
     if (g_saved.inner && g_saved.inner->count() >= 2) {
         const int height = g_saved.inner->height();
-        if (height > 0) {
-            if (g_infoPage) g_saved.inner->setSizes({1, 0});
-            else {
-                const int treeH = qMin(kTreeHeight, qMax(120, height - 160));
-                g_saved.inner->setSizes({treeH, height - treeH});
-            }
-        }
+        if (height > 0) g_saved.inner->setSizes(treeSizes(height));
+        lockSplitter(g_saved.inner);
     }
 }
 
 void restoreLayout() {
     if (!g_layoutApplied) return;
     if (g_saved.outer) {
+        unlockSplitter(g_saved.outer);
         g_saved.outer->setOrientation(g_saved.outerOrientation);
         if (!g_saved.outerSizes.isEmpty()) g_saved.outer->setSizes(g_saved.outerSizes);
     }
     if (g_saved.inner) {
+        unlockSplitter(g_saved.inner);
         g_saved.inner->setOrientation(g_saved.innerOrientation);
         if (!g_saved.innerSizes.isEmpty()) g_saved.inner->setSizes(g_saved.innerSizes);
     }
@@ -655,11 +690,18 @@ void applyWindowFrame(bool dark) {
 
 // Dialogs (options, channel editor, ...) are built after startup. Catching
 // their Show event avoids a light caption until the next heartbeat.
+void syncMainWindowLayout();
+
 class FrameFilter : public QObject {
 public:
     explicit FrameFilter(QObject* parent = nullptr) : QObject(parent) {}
     bool eventFilter(QObject* obj, QEvent* ev) override {
-        if (ev->type() == QEvent::Show && g_darkMode == 1) {
+        if (ev->type() == QEvent::Resize) {
+            auto* w = qobject_cast<QWidget*>(obj);
+            if (w && w->isWindow() &&
+                QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow"))
+                syncMainWindowLayout();
+        } else if (ev->type() == QEvent::Show && g_darkMode == 1) {
             auto* w = qobject_cast<QWidget*>(obj);
             if (w && w->isWindow()) applyWindowFrame(true);
         }
@@ -942,9 +984,9 @@ void showPokeToast(uint64 schid, const QString& poker, const QString& message) {
               });
 }
 
-// The client ships its sound packs under <install>/sound. Prefer the Flat
-// White pack when it is installed, otherwise the stock pack, so the cue
-// follows the theme without depending on the Notifications option page.
+// The client ships its sound packs under <install>/sound. Prefer a Flat White
+// or Flat Dark pack when one is installed, otherwise the stock pack, so the
+// cue follows the theme without depending on the Notifications option page.
 QString notificationSoundPath() {
     if (!g_funcs.getAppPath) return QString();
     char buf[1024] = {};
@@ -952,6 +994,8 @@ QString notificationSoundPath() {
     const QDir base(QString::fromUtf8(buf));
     const char* candidates[] = {
         "sound/flatwhite/chat_message_inbound.wav",
+        "sound/Flat White Sounds/chat_message_inbound.wav",
+        "sound/Flat Dark Sounds/chat_message_inbound.wav",
         "sound/default/chat_message_inbound.wav",
     };
     for (const char* rel : candidates) {
@@ -1472,14 +1516,20 @@ void openPrivateChat(unsigned short clientId, const QString& name) {
 void applyLayout();
 void pinSplitterSizes();
 
-// The window is pinned to a fixed size; the splitter ratios in applyLayout
-// are tuned for it. Re-checked on every heartbeat: the client restores its
-// saved geometry after startup and can undo a one-shot resize.
-void applyDefaultWindowSize() {
+// The window now resizes freely, so only a floor is enforced: below it the
+// sidebar arrangement no longer has a usable chat column. The on-screen check
+// stays because the client restores its last geometry, which may point at a
+// monitor that has since been unplugged.
+void applyWindowBounds() {
     for (QWidget* w : QApplication::topLevelWidgets()) {
         if (!w || !w->isWindow() || !w->isVisible()) continue;
         if (QString::fromLatin1(w->metaObject()->className()) != "MainWindow") continue;
         {
+            if (w->minimumWidth() != kMinWindowWidth || w->minimumHeight() != kMinWindowHeight) {
+                w->setMinimumSize(kMinWindowWidth, kMinWindowHeight);
+                logLine(QString("window minimum size applied: %1x%2")
+                            .arg(kMinWindowWidth).arg(kMinWindowHeight));
+            }
             const QRect frame = w->frameGeometry();
             bool onScreen = false;
             for (QScreen* screen : QGuiApplication::screens()) {
@@ -1489,13 +1539,6 @@ void applyDefaultWindowSize() {
                     onScreen = true;
                     break;
                 }
-            }
-            if (w->width() != kWindowWidth || w->height() != kWindowHeight) {
-                // setFixedSize, not resize: a one-shot resize is undone by the
-                // client's own layout on the next reflow.
-                w->setFixedSize(kWindowWidth, kWindowHeight);
-                logLine(QString("fixed window size applied: %1x%2").arg(w->width()).arg(w->height()));
-                pinSplitterSizes();
             }
             if (!onScreen) {
                 QScreen* target = w->screen() ? w->screen() : QGuiApplication::primaryScreen();
@@ -1582,6 +1625,15 @@ void centerChatInput() {
     if (edit->height() < h) edit->setMinimumHeight(h);
 }
 
+// Live window resizes arrive between heartbeats. Recompute the ratio split and
+// the hand-positioned pieces immediately so the panes scale with the window
+// instead of snapping once the 1.5s tick lands.
+void syncMainWindowLayout() {
+    pinSplitterSizes();
+    layoutPane();
+    centerChatInput();
+}
+
 // --------------------------------------------------------------- fast burst
 
 // Right after startup or a reconnect the client builds a fresh widget tree and
@@ -1619,7 +1671,7 @@ void heartbeat() {
     hideStockToolbar();
     hideChatExtras();
     centerChatInput();
-    applyDefaultWindowSize();
+    applyWindowBounds();
     QTreeView* tree = findActiveTree();
     if (tree) {
         styleTree(tree);
@@ -1715,7 +1767,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.3.0";
+    return "1.4.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;
@@ -1724,7 +1776,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_author() {
     return "3ku-nanodesu";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_description() {
-    return "Content-first layout, Discord-style channel tree, modern chat bubbles, a user panel, poke notifications and light/dark theme support for the Flat White and Flat Dark themes.";
+    return "Content-first layout, Discord-style channel tree, modern chat bubbles, a user panel, poke notifications, free window resizing and light/dark theme support for the Flat White and Flat Dark themes.";
 }
 extern "C" __declspec(dllexport) void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
     g_funcs = funcs;
