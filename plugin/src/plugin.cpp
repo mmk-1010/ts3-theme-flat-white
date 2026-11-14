@@ -688,6 +688,25 @@ void applyWindowFrame(bool dark) {
     }
 }
 
+// The native volume dialog uses SetFixedSize. Its unwrapped hint changes at
+// 0/6 dB, resizing the dialog and moving the slider under the pointer. Reserve
+// a stable, wrapped hint area before the dialog is shown; keep all native
+// volume signals and buttons intact.
+void stabilizeVolumeDialog(QWidget* w) {
+    if (!w || QString::fromLatin1(w->metaObject()->className()) !=
+                  QLatin1String("UserVolumeWidget")) return;
+    auto* hint = w->findChild<QLabel*>(QStringLiteral("hintLabel"), Qt::FindDirectChildrenOnly);
+    if (!hint || hint->property("flatWhiteStableHint").toBool()) return;
+    const QMargins margins = hint->contentsMargins();
+    const int width = hint->width();
+    const int height = qMax(hint->height(), hint->fontMetrics().lineSpacing() * 3 +
+                                               margins.top() + margins.bottom());
+    hint->setWordWrap(true);
+    hint->setFixedSize(width, height);
+    hint->setProperty("flatWhiteStableHint", true);
+    if (w->layout()) w->layout()->activate();
+}
+
 // Dialogs (options, channel editor, ...) are built after startup. Catching
 // their Show event avoids a light caption until the next heartbeat.
 void syncMainWindowLayout();
@@ -701,9 +720,12 @@ public:
             if (w && w->isWindow() &&
                 QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow"))
                 syncMainWindowLayout();
-        } else if (ev->type() == QEvent::Show && g_darkMode == 1) {
+        } else if (ev->type() == QEvent::Show) {
             auto* w = qobject_cast<QWidget*>(obj);
-            if (w && w->isWindow()) applyWindowFrame(true);
+            if (w && w->isWindow()) {
+                stabilizeVolumeDialog(w);
+                if (g_darkMode == 1) applyWindowFrame(true);
+            }
         }
         return QObject::eventFilter(obj, ev);
     }
@@ -1767,7 +1789,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.4.0";
+    return "1.5.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;

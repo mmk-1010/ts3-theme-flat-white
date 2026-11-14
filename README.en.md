@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | **English**
 
-Author: **3ku-nanodesu**　Version: 1.4
+Author: **3ku-nanodesu**　Version: 1.5
 
 ![Flat White and Flat Dark interfaces](assets/theme-preview.png)
 
@@ -29,8 +29,8 @@ Pick any archive from the [Releases](https://github.com/mmk-1010/ts3-theme-flat-
 
 | Archive | Contents |
 | --- | --- |
-| `Flat-White-1.4.zip` | Light theme + light icons + plugin + sounds |
-| `Flat-Dark-1.4.zip` | Dark theme + dark icons + plugin + sounds |
+| `Flat-White-1.5.zip` | Light theme + light icons + plugin + sounds |
+| `Flat-Dark-1.5.zip` | Dark theme + dark icons + plugin + sounds |
 
 Both archives contain the same plugin features and sound effects; every file inside the
 dark archive uses a Flat Dark name. The plugin provides the Discord-style layout, bubble
