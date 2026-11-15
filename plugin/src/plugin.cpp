@@ -63,6 +63,7 @@ void cleanupUi();
 namespace {
 
 TS3Functions g_funcs{};
+QByteArray g_pluginId;
 QPointer<ChannelSidebar> g_panel;
 QPointer<UserPanel> g_userPanel;
 QPointer<ChatHeader> g_chatHeader;
@@ -94,6 +95,7 @@ QPointer<QTabWidget> g_chatTab;
 QPointer<QObject> g_chatFilter;
 QPointer<QWidget> g_chatLog;
 QHash<QString, QVector<ChatMessage>> g_chatHistory;
+QHash<uint64, int> g_connectionStatus;
 // Scroll offset per conversation; -1 means the reader was at the bottom.
 // Kept across tab switches (and the client's own page flips) so coming back to
 // a conversation does not jump.
@@ -955,10 +957,82 @@ void appendSystemMessage(uint64 schid, const QString& text, int severity = 0) {
     if (g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
 }
 
-void queueSystemMessage(uint64 schid, const QString& text) {
+void queueSystemMessage(uint64 schid, const QString& text, int severity = 0) {
     if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [schid, text] { appendSystemMessage(schid, text); },
+    QMetaObject::invokeMethod(g_guard, [schid, text, severity] { appendSystemMessage(schid, text, severity); },
                               Qt::QueuedConnection);
+}
+
+QString connectionErrorText(unsigned int error) {
+    switch (error) {
+    case ERROR_client_is_flooding: return QStringLiteral("操作过于频繁，触发服务器防洪保护，请稍后再试");
+    case ERROR_server_invalid_password: return QStringLiteral("服务器密码错误");
+    case ERROR_server_maxclients_reached: return QStringLiteral("服务器人数已满");
+    case ERROR_server_is_shutting_down: return QStringLiteral("服务器正在关闭");
+    case ERROR_failed_connection_initialisation:
+        return QStringLiteral("无法连接到服务器，请检查服务器地址、端口和网络连接");
+    case ERROR_could_not_resolve_hostname: return QStringLiteral("无法解析服务器域名");
+    case ERROR_connection_lost: return QStringLiteral("与服务器的连接丢失");
+    case ERROR_handshake_failed: return QStringLiteral("与服务器握手失败");
+    default: break;
+    }
+    QString text;
+    if (g_funcs.getErrorMessage) {
+        char* message = nullptr;
+        if (g_funcs.getErrorMessage(error, &message) == ERROR_ok && message) {
+            text = QString::fromUtf8(message).trimmed();
+            g_funcs.freeMemory(message);
+        }
+    }
+    return text.isEmpty() ? QStringLiteral("未知错误") : text;
+}
+
+QString operationErrorText(unsigned int error, const QString& message = QString(),
+                            const QString& extra = QString()) {
+    QString text = error == ERROR_client_is_flooding ? connectionErrorText(error) : message.trimmed();
+    if (text.isEmpty()) text = connectionErrorText(error);
+    const QString detail = extra.trimmed();
+    if (!detail.isEmpty() && !text.contains(detail)) text += QStringLiteral("：") + detail;
+    return QStringLiteral("%1（错误码 %2）").arg(text).arg(error);
+}
+
+void appendOperationError(uint64 schid, const QString& text) {
+    appendSystemMessage(schid, text, 2);
+    if (!g_modernChat || !g_modernChat->isVisible() || g_overlayKey.isEmpty() ||
+        g_overlayKey == serverKey(schid) || !g_funcs.getCurrentServerConnectionHandlerID ||
+        g_funcs.getCurrentServerConnectionHandlerID() != schid) return;
+    // Private keys are name-based; check the active connection as well as the
+    // overlay key so another server's error never enters this conversation.
+    const bool channel = g_overlayKey.startsWith(QString::number(schid) + QLatin1Char(':'));
+    if (!channel && !g_overlayKey.startsWith(QStringLiteral("p:"))) return;
+    ChatMessage msg;
+    msg.text = text;
+    msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
+    msg.system = true;
+    msg.severity = 2;
+    g_chatHistory[g_overlayKey].append(msg);
+    g_modernChat->addMessage(msg);
+}
+
+void queueOperationError(uint64 schid, const QString& text) {
+    if (!qApp || !g_guard) return;
+    QMetaObject::invokeMethod(g_guard, [schid, text] { appendOperationError(schid, text); },
+                              Qt::QueuedConnection);
+}
+
+void queueChannelChange(uint64 schid, uint64 channelId, anyID invokerId,
+                        const char* invokerName, bool created) {
+    if (!qApp || !g_guard) return;
+    // Copy callback data and the current channel name before a later rename
+    // or deletion can change them while the UI event is still queued.
+    QString actor = invokerName ? QString::fromUtf8(invokerName).trimmed() : QString();
+    if (actor.isEmpty()) actor = clientNameById(schid, invokerId);
+    if (actor.isEmpty())
+        actor = invokerId ? QStringLiteral("用户 #%1").arg(invokerId) : QStringLiteral("服务器");
+    QString channel = channelNameById(schid, channelId);
+    if (channel.isEmpty()) channel = QStringLiteral("#%1").arg(channelId);
+    queueSystemMessage(schid, (created ? QStringLiteral("%1 创建了频道 %2")
+                                       : QStringLiteral("%1 编辑了频道 %2")).arg(actor, channel));
 }
 
 // MainWindow hosts all floating plugin UI. Re-found on every use: the client
@@ -1345,6 +1419,15 @@ void refreshClientNames() {
     g_funcs.freeMemory(clients);
 }
 
+void applySelfState(uint64 server, anyID self, int flag, bool value, bool local) {
+    if (!g_funcs.getCurrentServerConnectionHandlerID ||
+        g_funcs.getCurrentServerConnectionHandlerID() != server) return;
+    if (g_userPanel) g_userPanel->setSelfState(server, self, flag, value, local);
+    if (g_treeRows) g_treeRows->setSelfState(server, self, flag, value, local);
+    if (g_styledTree) g_styledTree->viewport()->update();
+    updateInfoStatus();
+}
+
 void refreshClientStatesNow() {
     if (!g_treeRows) return;
     g_treeRows->refreshStates();
@@ -1433,6 +1516,16 @@ void installChannelPanel() {
         auto* user = new UserPanel(pane);
         user->setFocusPolicy(Qt::NoFocus);
         user->setFunctions(g_funcs);
+        user->setPluginId(g_pluginId);
+        user->setStateChangeHandler([](quint64 server, unsigned short self, int flag, bool value) {
+            applySelfState(server, self, flag, value, true);
+        });
+        user->setErrorHandler([](quint64 server, int flag, unsigned int error) {
+            const QString action = flag == CLIENT_AWAY ? QStringLiteral("切换离开状态失败")
+                : (flag == CLIENT_INPUT_MUTED ? QStringLiteral("切换麦克风静音失败")
+                                              : QStringLiteral("切换耳机静音失败"));
+            queueOperationError(server, action + QStringLiteral("：") + operationErrorText(error));
+        });
         g_userPanelHost = pane;
         g_paneTree = tree;
         g_userPanel = user;
@@ -1789,7 +1882,7 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.5.0";
+    return "1.6.0";
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;
@@ -1803,6 +1896,14 @@ extern "C" __declspec(dllexport) const char* ts3plugin_description() {
 extern "C" __declspec(dllexport) void ts3plugin_setFunctionPointers(const struct TS3Functions funcs) {
     g_funcs = funcs;
     logLine("setFunctionPointers");
+}
+extern "C" __declspec(dllexport) void ts3plugin_registerPluginID(const char* id) {
+    g_pluginId = id ? QByteArray(id) : QByteArray();
+    if (!qApp || !g_guard) return;
+    const QByteArray pluginId = g_pluginId;
+    QMetaObject::invokeMethod(g_guard, [pluginId] {
+        if (g_userPanel) g_userPanel->setPluginId(pluginId);
+    }, Qt::QueuedConnection);
 }
 extern "C" __declspec(dllexport) int ts3plugin_init() {
     logLine("init");
@@ -1838,6 +1939,7 @@ void cleanupUi() {
     }
     delete g_guard.data();
     g_guard = nullptr;
+    g_connectionStatus.clear();
 
     if (g_infoConn) { QObject::disconnect(g_infoConn); g_infoConn = QMetaObject::Connection(); }
     if (g_chatTabConn) { QObject::disconnect(g_chatTabConn); g_chatTabConn = QMetaObject::Connection(); }
@@ -1901,18 +2003,34 @@ extern "C" __declspec(dllexport) void ts3plugin_onTalkStatusChangeEvent(
 
 extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
     uint64 serverConnectionHandlerID, int status, unsigned int errorNumber) {
-    Q_UNUSED(errorNumber);
     if (!qApp || !g_guard) return;
-    QString text;
-    switch (status) {
-    case STATUS_CONNECTING: text = QStringLiteral("正在连接服务器…"); break;
-    case STATUS_CONNECTED: text = QStringLiteral("服务器已接受连接"); break;
-    case STATUS_CONNECTION_ESTABLISHING: text = QStringLiteral("正在进入服务器…"); break;
-    case STATUS_CONNECTION_ESTABLISHED: text = QStringLiteral("已连接到服务器"); break;
-    case STATUS_DISCONNECTED: text = QStringLiteral("与服务器的连接已断开"); break;
-    default: break;
-    }
-    if (!text.isEmpty()) queueSystemMessage(serverConnectionHandlerID, text);
+    const QString reason = errorNumber != ERROR_ok ? connectionErrorText(errorNumber) : QString();
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, status, errorNumber, reason] {
+        const int previous = g_connectionStatus.value(serverConnectionHandlerID, STATUS_DISCONNECTED);
+        g_connectionStatus[serverConnectionHandlerID] = status;
+        QString text;
+        int severity = 0;
+        switch (status) {
+        case STATUS_CONNECTING: text = QStringLiteral("正在连接服务器…"); break;
+        case STATUS_CONNECTED: text = QStringLiteral("服务器已接受连接"); break;
+        case STATUS_CONNECTION_ESTABLISHING: text = QStringLiteral("正在进入服务器…"); break;
+        case STATUS_CONNECTION_ESTABLISHED: text = QStringLiteral("已连接到服务器"); break;
+        case STATUS_DISCONNECTED:
+            if (errorNumber != ERROR_ok) {
+                text = (previous == STATUS_CONNECTION_ESTABLISHED
+                            ? QStringLiteral("与服务器的连接已断开：%1（错误码 %2）")
+                            : QStringLiteral("连接服务器失败：%1（错误码 %2）"))
+                           .arg(reason).arg(errorNumber);
+                severity = 2;
+            } else {
+                text = QStringLiteral("与服务器的连接已断开");
+            }
+            g_connectionStatus.remove(serverConnectionHandlerID);
+            break;
+        default: break;
+        }
+        if (!text.isEmpty()) appendSystemMessage(serverConnectionHandlerID, text, severity);
+    }, Qt::QueuedConnection);
     // A reconnect rebuilds the panes from scratch, so the stock widgets are
     // painted again; catch the new tree within a couple of frames.
     if (status == STATUS_CONNECTED || status == STATUS_CONNECTION_ESTABLISHED) startBurst();
@@ -1926,6 +2044,25 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
             updateChatOverlay();
         }, Qt::QueuedConnection);
     }
+}
+
+// Initial channel synchronization uses onNewChannelEvent; only this callback
+// describes a channel that was actually created by an actor.
+extern "C" __declspec(dllexport) void ts3plugin_onNewChannelCreatedEvent(
+    uint64 serverConnectionHandlerID, uint64 channelID, uint64 channelParentID,
+    anyID invokerID, const char* invokerName, const char* invokerUniqueIdentifier) {
+    Q_UNUSED(channelParentID);
+    Q_UNUSED(invokerUniqueIdentifier);
+    queueChannelChange(serverConnectionHandlerID, channelID, invokerID, invokerName, true);
+    queueTreeRefresh();
+}
+
+extern "C" __declspec(dllexport) void ts3plugin_onUpdateChannelEditedEvent(
+    uint64 serverConnectionHandlerID, uint64 channelID, anyID invokerID,
+    const char* invokerName, const char* invokerUniqueIdentifier) {
+    Q_UNUSED(invokerUniqueIdentifier);
+    queueChannelChange(serverConnectionHandlerID, channelID, invokerID, invokerName, false);
+    queueTreeRefresh();
 }
 
 extern "C" __declspec(dllexport) void ts3plugin_onClientMoveEvent(
@@ -2009,16 +2146,23 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientMoveMovedEvent(
 }
 
 extern "C" __declspec(dllexport) void ts3plugin_onClientSelfVariableUpdateEvent(
-    uint64 serverConnectionHandlerID, int flag, const char* value) {
-    Q_UNUSED(serverConnectionHandlerID);
-    Q_UNUSED(flag);
-    Q_UNUSED(value);
+    uint64 serverConnectionHandlerID, int flag, const char* oldValue, const char* newValue) {
+    Q_UNUSED(oldValue);
     if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [] {
-        refreshClientStatesNow();
-        // The user panel's mic/speaker/away badges are ours to redraw; the
-        // 1.5s heartbeat was the only thing touching them before.
-        if (g_userPanel) g_userPanel->refresh();
+    const bool stateFlag = flag == CLIENT_AWAY || flag == CLIENT_INPUT_MUTED || flag == CLIENT_OUTPUT_MUTED;
+    bool valid = false;
+    const int state = newValue ? QString::fromUtf8(newValue).toInt(&valid) : 0;
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, flag, stateFlag, valid, state] {
+        if (!g_funcs.getCurrentServerConnectionHandlerID ||
+            g_funcs.getCurrentServerConnectionHandlerID() != serverConnectionHandlerID) return;
+        anyID self = 0;
+        if (stateFlag && valid && g_funcs.getClientID &&
+            g_funcs.getClientID(serverConnectionHandlerID, &self) == ERROR_ok && self) {
+            applySelfState(serverConnectionHandlerID, self, flag, state != 0, false);
+        } else {
+            refreshClientStatesNow();
+            if (g_userPanel) g_userPanel->refresh();
+        }
     }, Qt::QueuedConnection);
 }
 
@@ -2064,37 +2208,26 @@ extern "C" __declspec(dllexport) void ts3plugin_onServerLogEvent(
 // Server-rejected actions are what the client paints as red console lines
 // ("insufficient permissions", "you are not allowed to ..."). They arrive on
 // this callback, not on onServerLogEvent.
-extern "C" __declspec(dllexport) void ts3plugin_onServerErrorEvent(
+extern "C" __declspec(dllexport) int ts3plugin_onServerErrorEvent(
     uint64 serverConnectionHandlerID, const char* errorMessage, unsigned int error,
     const char* returnCode, const char* extraMessage) {
     Q_UNUSED(returnCode);
-    if (!qApp || !g_guard) return;
-    QString text;
-    if (errorMessage && *errorMessage)
-        text = QString::fromUtf8(errorMessage).trimmed();
-    else if (extraMessage && *extraMessage)
-        text = QString::fromUtf8(extraMessage).trimmed();
-    else if (g_funcs.getErrorMessage && error != 0) {
-        char* msg = nullptr;
-        if (g_funcs.getErrorMessage(error, &msg) == ERROR_ok && msg) {
-            text = QString::fromUtf8(msg).trimmed();
-            g_funcs.freeMemory(msg);
-        }
-    }
-    if (text.isEmpty()) text = QStringLiteral("服务器错误");
+    if (error == ERROR_ok || !qApp || !g_guard) return 0;
+    const QString text = operationErrorText(error,
+        errorMessage ? QString::fromUtf8(errorMessage) : QString(),
+        extraMessage ? QString::fromUtf8(extraMessage) : QString());
     logLine(QStringLiteral("server error [%1]: %2").arg(error).arg(text));
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, text] {
-        appendSystemMessage(serverConnectionHandlerID, text, 2);
-    }, Qt::QueuedConnection);
+    queueOperationError(serverConnectionHandlerID, text);
+    return 0;
 }
 
 // "Insufficient permission" red lines from the server arrive here, not via
 // onServerLogEvent; the failed permission name is resolved through the API.
-extern "C" __declspec(dllexport) void ts3plugin_onServerPermissionErrorEvent(
+extern "C" __declspec(dllexport) int ts3plugin_onServerPermissionErrorEvent(
     uint64 serverConnectionHandlerID, const char* errorMessage, unsigned int error,
     const char* returnCode, unsigned int failedPermissionID) {
     Q_UNUSED(returnCode);
-    if (!qApp || !g_guard) return;
+    if (error == ERROR_ok || !qApp || !g_guard) return 0;
     QString text = (errorMessage && *errorMessage) ? QString::fromUtf8(errorMessage).trimmed()
                                                    : QString();
     QString perm;
@@ -2106,10 +2239,10 @@ extern "C" __declspec(dllexport) void ts3plugin_onServerPermissionErrorEvent(
     }
     if (!perm.isEmpty()) text = text.isEmpty() ? perm : text + QStringLiteral("（") + perm + QStringLiteral("）");
     if (text.isEmpty()) text = QStringLiteral("权限不足");
+    text = operationErrorText(error, text);
     logLine(QStringLiteral("permission error [%1]: %2").arg(failedPermissionID).arg(text));
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, text] {
-        appendSystemMessage(serverConnectionHandlerID, text, 2);
-    }, Qt::QueuedConnection);
+    queueOperationError(serverConnectionHandlerID, text);
+    return 0;
 }
 // A poke is delivered only to its target and is not a text message, so the
 // overlay would otherwise stay silent when someone pokes you.

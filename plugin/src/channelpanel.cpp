@@ -665,6 +665,39 @@ bool UserPanel::buttonActive(int index) const {
     return m_outputMuted;
 }
 
+void SelfStateChanges::bind(quint64 server, unsigned short client) {
+    if (m_server == server && m_client == client) return;
+    m_server = server;
+    m_client = client;
+    m_changes.clear();
+}
+
+bool SelfStateChanges::set(int flag, bool value, bool local) {
+    const auto it = m_changes.constFind(flag);
+    if (!local && it != m_changes.constEnd() && it->local &&
+        QDateTime::currentMSecsSinceEpoch() - it->stamp < 1200)
+        return it->value == value;
+    m_changes[flag] = {value, local, QDateTime::currentMSecsSinceEpoch()};
+    return true;
+}
+
+bool SelfStateChanges::resolve(int flag, bool polled) {
+    const auto it = m_changes.find(flag);
+    if (it == m_changes.end()) return polled;
+    if (QDateTime::currentMSecsSinceEpoch() - it->stamp < 1200) return it->value;
+    m_changes.erase(it);
+    return polled;
+}
+
+void UserPanel::setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local) {
+    m_selfChanges.bind(server, client);
+    if (!m_selfChanges.set(flag, value, local)) return;
+    if (flag == CLIENT_AWAY) m_away = value;
+    else if (flag == CLIENT_INPUT_MUTED) m_inputMuted = value;
+    else if (flag == CLIENT_OUTPUT_MUTED) m_outputMuted = value;
+    update();
+}
+
 void UserPanel::refresh() {
     if (!m_funcs.getCurrentServerConnectionHandlerID) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
@@ -685,17 +718,17 @@ void UserPanel::refresh() {
                 m_funcs.freeMemory(nick);
             }
         }
+        m_selfChanges.bind(h, self);
         int v = 0;
-        const bool fresh = QDateTime::currentMSecsSinceEpoch() - m_selfStamp >= 1200;
-        if (fresh && m_funcs.getClientVariableAsInt &&
+        if (m_funcs.getClientVariableAsInt &&
             m_funcs.getClientVariableAsInt(h, self, CLIENT_INPUT_MUTED, &v) == 0)
-            m_inputMuted = v != MUTEINPUT_NONE;
-        if (fresh && m_funcs.getClientVariableAsInt &&
+            m_inputMuted = m_selfChanges.resolve(CLIENT_INPUT_MUTED, v != MUTEINPUT_NONE);
+        if (m_funcs.getClientVariableAsInt &&
             m_funcs.getClientVariableAsInt(h, self, CLIENT_OUTPUT_MUTED, &v) == 0)
-            m_outputMuted = v != MUTEOUTPUT_NONE;
-        if (fresh && m_funcs.getClientVariableAsInt &&
+            m_outputMuted = m_selfChanges.resolve(CLIENT_OUTPUT_MUTED, v != MUTEOUTPUT_NONE);
+        if (m_funcs.getClientVariableAsInt &&
             m_funcs.getClientVariableAsInt(h, self, CLIENT_AWAY, &v) == 0)
-            m_away = v != AWAY_NONE;
+            m_away = m_selfChanges.resolve(CLIENT_AWAY, v != AWAY_NONE);
         if (m_funcs.getClientVariableAsInt && m_funcs.getClientVariableAsInt(h, self, CLIENT_FLAG_TALKING, &v) == 0) {
             // The heartbeat poll trails the talk event by up to 1.5s; do not
             // let a stale read undo a fresh one.
@@ -789,26 +822,36 @@ void UserPanel::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     const int button = buttonAt(e->pos());
     if (button < 0) return;
-    if (!m_funcs.getCurrentServerConnectionHandlerID || !m_funcs.setClientSelfVariableAsInt) return;
+    if (!m_funcs.getCurrentServerConnectionHandlerID || !m_funcs.setClientSelfVariableAsInt ||
+        !m_funcs.flushClientSelfUpdates || !m_funcs.getClientID) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
-    if (!h) return;
-    if (button == 0) {
-        m_away = !m_away;
-        m_funcs.setClientSelfVariableAsInt(h, CLIENT_AWAY, m_away ? AWAY_ZZZ : AWAY_NONE);
-    } else if (button == 1) {
-        m_inputMuted = !m_inputMuted;
-        m_funcs.setClientSelfVariableAsInt(h, CLIENT_INPUT_MUTED,
-                                          m_inputMuted ? MUTEINPUT_MUTED : MUTEINPUT_NONE);
-    } else {
-        m_outputMuted = !m_outputMuted;
-        m_funcs.setClientSelfVariableAsInt(h, CLIENT_OUTPUT_MUTED,
-                                          m_outputMuted ? MUTEOUTPUT_MUTED : MUTEOUTPUT_NONE);
+    unsigned short self = 0;
+    if (!h || m_funcs.getClientID(h, &self) != 0 || !self) return;
+    // Refresh first in case this click follows a server switch.
+    refresh();
+    const int flag = button == 0 ? CLIENT_AWAY
+                                 : (button == 1 ? CLIENT_INPUT_MUTED : CLIENT_OUTPUT_MUTED);
+    const bool value = !buttonActive(button);
+    const int enabled = button == 0 ? AWAY_ZZZ
+                                     : (button == 1 ? MUTEINPUT_MUTED : MUTEOUTPUT_MUTED);
+    const int target = value ? enabled : 0;
+    unsigned int error = m_funcs.setClientSelfVariableAsInt(h, flag, target);
+    if (error != 0) {
+        if (m_error) m_error(h, flag, error);
+        return;
     }
-    if (m_funcs.flushClientSelfUpdates) m_funcs.flushClientSelfUpdates(h, nullptr);
-    // Our own toggle is authoritative for a moment: the 1.5s poll would
-    // otherwise paint the pre-toggle state back.
-    m_selfStamp = QDateTime::currentMSecsSinceEpoch();
-    update();
+    char returnCode[128] = {};
+    if (!m_pluginId.isEmpty() && m_funcs.createReturnCode)
+        m_funcs.createReturnCode(m_pluginId.constData(), returnCode, sizeof(returnCode));
+    error = m_funcs.flushClientSelfUpdates(h, returnCode[0] ? returnCode : nullptr);
+    if (error != 0) {
+        // The setter stages a value locally; discard it if sending failed.
+        m_funcs.setClientSelfVariableAsInt(h, flag, buttonActive(button) ? enabled : 0);
+        if (m_error) m_error(h, flag, error);
+        return;
+    }
+    setSelfState(h, self, flag, value, true);
+    if (m_stateChange) m_stateChange(h, self, flag, value);
 }
 
 void UserPanel::mouseMoveEvent(QMouseEvent* e) {
@@ -862,9 +905,12 @@ void NativeTreeRows::refresh() {
     m_away.clear();
     m_inMuted.clear();
     m_outMuted.clear();
+    m_self = 0;
 
     if (!m_funcs.getCurrentServerConnectionHandlerID) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
+    if (h && m_funcs.getClientID) m_funcs.getClientID(h, &m_self);
+    m_selfChanges.bind(h, m_self);
     if (!h) return;
 
     if (m_funcs.getServerVariableAsString) {
@@ -949,13 +995,13 @@ void NativeTreeRows::refresh() {
                     pollTalking(stripClientTag(name), v != 0);
                 if (m_funcs.getClientVariableAsInt &&
                     m_funcs.getClientVariableAsInt(h, id, CLIENT_AWAY, &v) == 0)
-                    m_away[id] = v != AWAY_NONE;
+                    pollClientState(id, CLIENT_AWAY, v != AWAY_NONE);
                 if (m_funcs.getClientVariableAsInt &&
                     m_funcs.getClientVariableAsInt(h, id, CLIENT_INPUT_MUTED, &v) == 0)
-                    m_inMuted[id] = v != MUTEINPUT_NONE;
+                    pollClientState(id, CLIENT_INPUT_MUTED, v != MUTEINPUT_NONE);
                 if (m_funcs.getClientVariableAsInt &&
                     m_funcs.getClientVariableAsInt(h, id, CLIENT_OUTPUT_MUTED, &v) == 0)
-                    m_outMuted[id] = v != MUTEOUTPUT_NONE;
+                    pollClientState(id, CLIENT_OUTPUT_MUTED, v != MUTEOUTPUT_NONE);
             }
             m_funcs.freeMemory(clients);
         }
@@ -988,9 +1034,26 @@ void NativeTreeRows::pollTalking(const QString& name, bool talking) {
     m_talking[name] = talking;
 }
 
+void NativeTreeRows::setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local) {
+    m_self = client;
+    m_selfChanges.bind(server, client);
+    if (!m_selfChanges.set(flag, value, local)) return;
+    pollClientState(client, flag, value);
+}
+
+void NativeTreeRows::pollClientState(unsigned short client, int flag, bool value) {
+    if (client == m_self) value = m_selfChanges.resolve(flag, value);
+    if (flag == CLIENT_AWAY) m_away[client] = value;
+    else if (flag == CLIENT_INPUT_MUTED) m_inMuted[client] = value;
+    else if (flag == CLIENT_OUTPUT_MUTED) m_outMuted[client] = value;
+}
+
 void NativeTreeRows::refreshStates() {
     if (!m_funcs.getCurrentServerConnectionHandlerID) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
+    m_self = 0;
+    if (h && m_funcs.getClientID) m_funcs.getClientID(h, &m_self);
+    m_selfChanges.bind(h, m_self);
     if (!h || !m_funcs.getClientList) return;
     unsigned short* clients = nullptr;
     if (m_funcs.getClientList(h, &clients) != 0 || !clients) return;
@@ -1001,11 +1064,11 @@ void NativeTreeRows::refreshStates() {
             // CLIENT_FLAG_TALKING lags behind onTalkStatusChangeEvent; only
             // write it when no name is cached for this client yet.
             if (m_funcs.getClientVariableAsInt(h, id, CLIENT_AWAY, &v) == 0)
-                m_away[id] = v != AWAY_NONE;
+                pollClientState(id, CLIENT_AWAY, v != AWAY_NONE);
             if (m_funcs.getClientVariableAsInt(h, id, CLIENT_INPUT_MUTED, &v) == 0)
-                m_inMuted[id] = v != MUTEINPUT_NONE;
+                pollClientState(id, CLIENT_INPUT_MUTED, v != MUTEINPUT_NONE);
             if (m_funcs.getClientVariableAsInt(h, id, CLIENT_OUTPUT_MUTED, &v) == 0)
-                m_outMuted[id] = v != MUTEOUTPUT_NONE;
+                pollClientState(id, CLIENT_OUTPUT_MUTED, v != MUTEOUTPUT_NONE);
         }
     }
     m_funcs.freeMemory(clients);
@@ -1281,7 +1344,9 @@ struct ChatTextGeom {
     int height = 0;
 };
 
-ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth) {
+ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth,
+                           QTextOption::WrapMode wrapMode = QTextOption::WordWrap,
+                           Qt::Alignment alignment = Qt::AlignLeft) {
     ChatTextGeom g;
     g.text = text;
     g.font = font;
@@ -1299,7 +1364,8 @@ ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth
         para.top = top;
         para.layout.reset(new QTextLayout(text.mid(start, len), font));
         QTextOption opt;
-        opt.setWrapMode(QTextOption::WordWrap);
+        opt.setWrapMode(wrapMode);
+        opt.setAlignment(alignment);
         para.layout->setTextOption(opt);
         para.layout->beginLayout();
         qreal y = 0;
@@ -1402,7 +1468,15 @@ ChatRowGeom buildChatRow(int width, const QModelIndex& index) {
     g.valid = true;
     g.system = index.data(ChatSystem).toBool();
     if (g.system) {
-        g.height = 30;
+        const QString sender = index.data(ChatSender).toString();
+        const QString text = index.data(ChatText).toString();
+        const int innerWidth = qMax(1, width - 2 * kChatPad);
+        g.textGeom = buildChatText(sender.isEmpty() ? text : sender + QStringLiteral("  ") + text,
+                                   QFont(QStringLiteral("Microsoft YaHei UI"), 9), innerWidth,
+                                   QTextOption::WrapAtWordBoundaryOrAnywhere, Qt::AlignHCenter);
+        g.height = qMax(30, g.textGeom.height + 12);
+        g.textRect = QRect(kChatPad, g.height - 8 - g.textGeom.height,
+                           innerWidth, g.textGeom.height);
         return g;
     }
 
@@ -1458,11 +1532,21 @@ public:
         }
 
         const QString sender = index.data(ChatSender).toString();
-        const QString text = index.data(ChatText).toString();
         const QString time = index.data(ChatTime).toString();
         const bool self = index.data(ChatSelf).toBool();
 
         if (row.system) {
+            int selA = 0;
+            int selB = 0;
+            if (m_view && m_view->selectionRangeForRow(index.row(), selA, selB)) {
+                const QVector<QRectF> rects = chatSelectionRects(
+                    row.textGeom, selA, selB, row.textRect.topLeft() + option.rect.topLeft());
+                QColor highlight = discord::accent();
+                highlight.setAlpha(discord::isDark() ? 90 : 64);
+                p->setPen(Qt::NoPen);
+                p->setBrush(highlight);
+                for (const QRectF& rect : rects) p->drawRect(rect);
+            }
             p->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
             const int severity = index.data(ChatSeverity).toInt();
             // Server log errors keep the client's red; warnings amber; our
@@ -1470,8 +1554,11 @@ public:
             p->setPen(severity >= 2 ? discord::severityRed()
                                     : (severity == 1 ? discord::severityAmber()
                                                      : discord::faint()));
-            p->drawText(option.rect.adjusted(0, 0, 0, -8), Qt::AlignHCenter | Qt::AlignBottom,
-                        sender.isEmpty() ? text : sender + QStringLiteral("  ") + text);
+            for (const ChatPara& para : row.textGeom.paras) {
+                if (!para.layout) continue;
+                para.layout->draw(p, QPointF(option.rect.left() + row.textRect.left(),
+                                             option.rect.top() + row.textRect.top() + para.top));
+            }
             p->restore();
             return;
         }
@@ -1624,11 +1711,6 @@ void ModernChat::showEvent(QShowEvent* ev) {
 }
 
 void ModernChat::addMessage(const ChatMessage& msg) {
-    // Drop the empty-state hint as soon as the first real message arrives.
-    if (!msg.system && count() == 1 && item(0) && item(0)->data(ChatSystem).toBool()) {
-        clear();
-        clearTextSelection();
-    }
     auto* sb = verticalScrollBar();
     const int keepValue = sb ? sb->value() : 0;
     auto* item = new QListWidgetItem(this);
@@ -1703,7 +1785,7 @@ bool ModernChat::selectionRangeForRow(int row, int& start, int& end) const {
     start = end = 0;
     if (m_selAnchorRow < 0 || m_selCursorRow < 0) return false;
     const QListWidgetItem* it = item(row);
-    if (!it || it->data(ChatSystem).toBool()) return false;
+    if (!it) return false;
 
     int aRow = m_selAnchorRow;
     int aPos = m_selAnchorPos;
@@ -1715,7 +1797,7 @@ bool ModernChat::selectionRangeForRow(int row, int& start, int& end) const {
     }
     if (row < aRow || row > cRow) return false;
 
-    const int len = it->data(ChatText).toString().size();
+    const int len = rowPlainText(row).size();
     start = row == aRow ? qBound(0, aPos, len) : 0;
     end = row == cRow ? qBound(0, cPos, len) : len;
     return end > start;
@@ -1741,7 +1823,7 @@ ModernChat::TextPos ModernChat::positionAt(const QPoint& viewportPos) const {
 
     p.row = row;
     const ChatRowGeom g = buildChatRow(viewport()->width(), model()->index(row, 0));
-    if (!g.valid || g.system || g.textGeom.text.isEmpty()) return p;
+    if (!g.valid || g.textGeom.text.isEmpty()) return p;
 
     const QRect rowRect = visualItemRect(item(row));
     const QPointF local(pt.x() - g.textRect.left(), pt.y() - rowRect.top() - g.textRect.top());
@@ -1805,9 +1887,9 @@ void ModernChat::mouseDoubleClickEvent(QMouseEvent* ev) {
     const TextPos p = positionAt(ev->pos());
     if (p.row < 0) return;
     const QListWidgetItem* it = item(p.row);
-    if (!it || it->data(ChatSystem).toBool()) return;
+    if (!it) return;
 
-    const QString text = it->data(ChatText).toString();
+    const QString text = rowPlainText(p.row);
     int a = qBound(0, p.pos, text.size());
     int b = a;
     while (a > 0 && chatWordChar(text.at(a - 1))) --a;
@@ -1854,7 +1936,7 @@ void ModernChat::contextMenuEvent(QContextMenuEvent* ev) {
                         (m_selAnchorRow != m_selCursorRow ||
                          m_selAnchorPos != m_selCursorPos));
     QAction* copyRowAct = menu.addAction(QStringLiteral("复制这条消息"));
-    copyRowAct->setEnabled(row >= 0 && !item(row)->data(ChatSystem).toBool());
+    copyRowAct->setEnabled(row >= 0);
     QAction* allAct = menu.addAction(QStringLiteral("复制全部"));
     allAct->setEnabled(count() > 0);
 
@@ -1891,8 +1973,8 @@ void ModernChat::copySelection() {
     QStringList parts;
     for (int row = aRow; row <= cRow; ++row) {
         const QListWidgetItem* it = item(row);
-        if (!it || it->data(ChatSystem).toBool()) continue;
-        const QString text = it->data(ChatText).toString();
+        if (!it) continue;
+        const QString text = rowPlainText(row);
         if (row == aRow && row == cRow) {
             const int from = qBound(0, aPos, text.size());
             const int to = qBound(0, cPos, text.size());

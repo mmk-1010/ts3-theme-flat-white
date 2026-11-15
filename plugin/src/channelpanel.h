@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QColor>
 #include <QHash>
 #include <QPoint>
@@ -135,6 +136,25 @@ private:
 
 // ---------------------------------------------------------------------------
 
+// Short-lived local values bridge the SDK cache lag after a state change.
+// Scoped to a connection and client so switching servers cannot reuse them.
+class SelfStateChanges {
+public:
+    void bind(quint64 server, unsigned short client);
+    bool set(int flag, bool value, bool local);
+    bool resolve(int flag, bool polled);
+
+private:
+    struct Change {
+        bool value = false;
+        bool local = false;
+        qint64 stamp = 0;
+    };
+    quint64 m_server = 0;
+    unsigned short m_client = 0;
+    QHash<int, Change> m_changes;
+};
+
 class UserPanel : public QWidget {
 public:
     explicit UserPanel(QWidget* parent = nullptr);
@@ -142,6 +162,14 @@ public:
     void setFunctions(const TS3Functions& funcs) { m_funcs = funcs; }
     void refresh();
     void setTalking(bool talking);
+    void setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local);
+    void setStateChangeHandler(std::function<void(quint64, unsigned short, int, bool)> handler) {
+        m_stateChange = std::move(handler);
+    }
+    void setErrorHandler(std::function<void(quint64, int, unsigned int)> handler) {
+        m_error = std::move(handler);
+    }
+    void setPluginId(const QByteArray& id) { m_pluginId = id; }
 
     QSize sizeHint() const override { return QSize(280, 64); }
 
@@ -166,7 +194,10 @@ private:
     bool m_away = false;
     bool m_talking = false;
     qint64 m_talkStamp = 0;
-    qint64 m_selfStamp = 0;
+    SelfStateChanges m_selfChanges;
+    std::function<void(quint64, unsigned short, int, bool)> m_stateChange;
+    std::function<void(quint64, int, unsigned int)> m_error;
+    QByteArray m_pluginId;
     int m_hover = -1;
 };
 
@@ -182,6 +213,7 @@ public:
     void setFunctions(const TS3Functions& funcs) { m_funcs = funcs; }
     void refresh();
     void refreshStates();
+    void setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local);
     void setTalking(unsigned short clientId, const QString& displayName, bool talking);
     bool isClientRow(const QModelIndex& index) const { return kindOf(index) == ClientRow; }
     QString clientStatus(const QModelIndex& index) const;
@@ -199,7 +231,10 @@ private:
     QString stripClientTag(const QString& raw) const;
     unsigned short clientIdFor(const QString& name) const;
     void pollTalking(const QString& name, bool talking);
+    void pollClientState(unsigned short client, int flag, bool value);
 
+    SelfStateChanges m_selfChanges;
+    unsigned short m_self = 0;
     TS3Functions m_funcs{};
     QString m_serverName;
     QString m_myChannel;

@@ -2,8 +2,6 @@
 
 **简体中文** | [English](README.en.md)
 
-作者：**3ku-nanodesu**　版本：1.5
-
 ![Flat White 与 Flat Dark 界面](assets/theme-preview.png)
 
 ## 风格
@@ -16,21 +14,26 @@ Microsoft YaHei UI 9pt，中英混排不跳行高。
 - **Flat Dark（深色）**：窗口底 `#141519`，面板 `#1B1D22`；正文 `#E7E9EC`，强调色 `#2DD4BF`。
   装配套插件后，Windows 标题栏、窗口边框和对话框也会一起变暗，而不只是客户区。
 
-配套两套线性图标、78 个合成音效，以及一个把界面重排为 Discord 式「内容优先」布局的插件。
-所有素材自行绘制／合成，不含第三方图片或音频。
+配套两套线性图标，以及一个把界面重排为 Discord 式「内容优先」布局的插件；
+另有 78 个合成音效，可选独立安装。所有素材自行绘制／合成，不含第三方图片或音频。
 
 ## 下载
 
-到 [Releases](https://github.com/mmk-1010/ts3-theme-flat-white/releases) 页面任选一个压缩包：
+到 [最新发布](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) 页面选择对应的 ZIP 压缩包：
 
 | 压缩包 | 内容 |
 | --- | --- |
-| `Flat-White-1.5.zip` | 浅色主题 + 浅色图标 + 插件 + 音效 |
-| `Flat-Dark-1.5.zip` | 深色主题 + 深色图标 + 插件 + 音效 |
+| [Flat White](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) | 浅色主题 + 浅色图标 + 插件 |
+| [Flat Dark](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) | 深色主题 + 深色图标 + 插件 |
 
-两个包的插件功能和音效内容相同；深色包内的文件统一使用 Flat Dark 名称。插件负责
+两个包的插件功能相同；深色包内的文件统一使用 Flat Dark 名称。插件负责
 Discord 式布局、气泡聊天、消息与戳一戳提醒、悬浮用户卡片、深色标题栏和自由缩放窗口。
-也可以单独下载主题、图标包、插件或音效包。
+系统事件与错误日志支持选择复制，自身的离开、麦克风及耳机静音状态会同步到用户面板、成员行和资料页。
+主题、图标包和插件也可以单独下载。
+
+**可选音效**：78 个合成音效，可独立下载安装
+[Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White-Sounds.ts3_soundpack) 或
+[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark-Sounds.ts3_soundpack)，两者音效内容相同。
 
 提醒音效会优先使用已经安装的 Flat White Sounds / Flat Dark Sounds 提示音，否则回退到
 客户端默认音效包；面板里的离开 / 麦克风 / 耳机按钮不依赖音效包。
@@ -46,7 +49,8 @@ Discord 式布局、气泡聊天、消息与戳一戳提醒、悬浮用户卡片
 3. **插件**：先完全退出 TS3，双击对应包里的 `.ts3_plugin`（深色包为
    `Flat Dark UI.ts3_plugin`）；再次启动后到 **工具 → 选项 → 插件** 确认
    *Flat White UI* 已勾选（深浅两包共用同一个插件，不会重复加载）。
-4. **音效**：双击 `.ts3_soundpack` 按提示安装（客户端装在 Program Files 下需要管理员权限），
+4. **音效（可选，独立安装）**：双击单独下载的 `.ts3_soundpack` 按提示安装
+   （客户端装在 Program Files 下需要管理员权限），
    重启后在 **工具 → 选项 → 通知 → 音效包** 选 *Flat White Sounds*（浅色）或
    *Flat Dark Sounds*（深色）。
 
