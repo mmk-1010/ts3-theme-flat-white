@@ -1145,6 +1145,80 @@ QSize NativeTreeRows::sizeHint(const QStyleOptionViewItem& option, const QModelI
     return QSize(200, h);
 }
 
+namespace {
+
+void drawTreeLabel(QPainter& painter, const QRect& rect, const QString& text) {
+    constexpr int alignment = Qt::AlignLeft | Qt::AlignVCenter;
+    const auto diamond = QStringLiteral("\U0001F538");
+    int i = text.indexOf(diamond);
+    if (i < 0 || painter.layoutDirection() == Qt::RightToLeft ||
+        text.contains(QLatin1Char('\n')) || text.contains(QChar::LineSeparator)) {
+        painter.drawText(rect, alignment, text);
+        return;
+    }
+
+    // Keep the glyph's advance and the surrounding native text, but suppress
+    // its color bitmap: a transparent outline makes Qt use the outline path.
+    QTextCharFormat hiddenDiamond;
+    hiddenDiamond.setForeground(Qt::transparent);
+    hiddenDiamond.setTextOutline(QPen(QColor(Qt::transparent)));
+    QVector<QTextLayout::FormatRange> formats;
+    for (; i >= 0; i = text.indexOf(diamond, i + diamond.size())) {
+        const int end = i + diamond.size();
+        const ushort variant = end < text.size() ? text.at(end).unicode() : 0;
+        if (variant != 0xFE0E)
+            formats.append({i, diamond.size() + (variant == 0xFE0F ? 1 : 0), hiddenDiamond});
+    }
+    if (formats.isEmpty()) {
+        painter.drawText(rect, alignment, text);
+        return;
+    }
+
+    QString label = text;
+    label.replace(QLatin1Char('\t'), QLatin1Char(' '));
+    label.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    QTextLayout layout(label, painter.font(), painter.device());
+    QTextOption option;
+    option.setTextDirection(painter.layoutDirection());
+    option.setWrapMode(QTextOption::NoWrap);
+    option.setFlags(QTextOption::IncludeTrailingSpaces);
+    layout.setTextOption(option);
+    layout.setFormats(formats);
+    layout.beginLayout();
+    QTextLine line = layout.createLine();
+    if (line.isValid()) line.setLineWidth(rect.width());
+    layout.endLayout();
+    if (!line.isValid()) return;
+
+    painter.save();
+    if (line.naturalTextWidth() > rect.width() || line.height() > rect.height())
+        painter.setClipRect(rect, Qt::IntersectClip);
+    const QPointF origin(rect.x(), rect.y() + (rect.height() - line.ascent() - line.descent()) / 2);
+    line.draw(&painter, origin);
+
+    // Draw a single solid shape with coverage antialiasing, not RGB text masks.
+    painter.setClipRect(rect, Qt::IntersectClip);
+    painter.setRenderHint(QPainter::Antialiasing);
+    for (const auto& format : formats) {
+        const qreal start = line.cursorToX(format.start, QTextLine::Leading);
+        const qreal end = line.cursorToX(format.start, QTextLine::Trailing);
+        const qreal advance = qAbs(end - start);
+        const qreal radius = advance * 0.19;
+        const qreal x = origin.x() + (start + end) / 2;
+        const qreal y = origin.y() + line.ascent() - advance * 0.26;
+        QPainterPath path;
+        path.moveTo(x, y - radius);
+        path.lineTo(x + radius, y);
+        path.lineTo(x, y + radius);
+        path.lineTo(x - radius, y);
+        path.closeSubpath();
+        painter.fillPath(path, QColor(0xFF, 0x67, 0x23));
+    }
+    painter.restore();
+}
+
+} // namespace
+
 void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
                            const QModelIndex& index) const {
     const Kind kind = kindOf(index);
@@ -1170,9 +1244,8 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->setPen(discord::ink());
         const QFontMetrics fm(f);
         const QString title = m_serverName.isEmpty() ? raw : m_serverName;
-        p->drawText(QRect(r.left() + 12, r.top(), r.width() - 24, r.height() - 4),
-                    Qt::AlignLeft | Qt::AlignVCenter,
-                    fm.elidedText(title, Qt::ElideRight, r.width() - 24));
+        drawTreeLabel(*p, QRect(r.left() + 12, r.top(), r.width() - 24, r.height() - 4),
+                      fm.elidedText(title, Qt::ElideRight, r.width() - 24));
         p->setPen(QPen(discord::divider(), 1));
         p->drawLine(r.left(), r.bottom(), r.right(), r.bottom());
         p->restore();
@@ -1189,9 +1262,8 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->setFont(f);
         p->setPen(discord::faint());
         const QFontMetrics fm(f);
-        p->drawText(QRect(r.left() + 14, r.top(), r.width() - 24, r.height()),
-                    Qt::AlignLeft | Qt::AlignVCenter,
-                    fm.elidedText(t, Qt::ElideRight, r.width() - 24));
+        drawTreeLabel(*p, QRect(r.left() + 14, r.top(), r.width() - 24, r.height()),
+                      fm.elidedText(t, Qt::ElideRight, r.width() - 24));
         p->restore();
         return;
     }
@@ -1202,9 +1274,8 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->setFont(f);
         p->setPen(discord::muted());
         const QFontMetrics fm(f);
-        p->drawText(QRect(r.left() + 4, r.top(), r.width() - 20, r.height()),
-                    Qt::AlignLeft | Qt::AlignVCenter,
-                    raw.toUpper());
+        drawTreeLabel(*p, QRect(r.left() + 4, r.top(), r.width() - 20, r.height()),
+                      raw.toUpper());
         p->restore();
         return;
     }
@@ -1218,9 +1289,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->setPen(discord::ink());
         const int left = r.left() + 26;
         const int right = r.right() - 26;
-        p->drawText(QRect(left, r.top(), right - left, r.height()),
-                    Qt::AlignLeft | Qt::AlignVCenter,
-                    raw);
+        drawTreeLabel(*p, QRect(left, r.top(), right - left, r.height()), raw);
         if (m_locked.contains(raw))
             drawLock(*p, QRectF(r.right() - 20, r.center().y() - 6, 11, 13), discord::faint());
         p->restore();
@@ -1284,8 +1353,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->setFont(groupFont);
         p->setPen(discord::ink());
         const int w = gfm.horizontalAdvance(tag);
-        p->drawText(QRect(x, r.top(), qMax(0, textRight - x), r.height()),
-                    Qt::AlignLeft | Qt::AlignVCenter, tag);
+        drawTreeLabel(*p, QRect(x, r.top(), qMax(0, textRight - x), r.height()), tag);
         x += w;
         if (x >= textRight) break;
         if (rest.startsWith(' ')) {
@@ -1296,8 +1364,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     p->setFont(rowFont);
     p->setPen(away ? discord::muted() : discord::ink());
     if (!rest.isEmpty() && x < textRight) {
-        p->drawText(QRect(x, r.top(), textRight - x, r.height()),
-                    Qt::AlignLeft | Qt::AlignVCenter, rest);
+        drawTreeLabel(*p, QRect(x, r.top(), textRight - x, r.height()), rest);
     }
     p->restore();
 }
