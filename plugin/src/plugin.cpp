@@ -1436,7 +1436,99 @@ void applySelfState(uint64 server, anyID self, int flag, bool value, bool local)
     updateInfoStatus();
 }
 
+struct SelfTalkState {
+    using Clock = std::chrono::steady_clock;
+    uint64 server = 0;
+    anyID client = 0;
+    bool talking = false;
+    Clock::time_point protectUntil{};
+};
+
+SelfTalkState g_selfTalk;
+SelfTalkState::Clock::time_point g_talkTraceStart;
+SelfTalkState::Clock::time_point g_talkTraceUntil;
+
+bool talkTraceActive() {
+    return SelfTalkState::Clock::now() < g_talkTraceUntil;
+}
+
+void logTalkTrace(const QString& detail) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        SelfTalkState::Clock::now() - g_talkTraceStart).count();
+    logLine(QStringLiteral("self-talk +%1ms %2 published=%3 panel=%4 tree=%5")
+        .arg(qlonglong(elapsed)).arg(detail).arg(g_selfTalk.talking)
+        .arg(!g_userPanel.isNull()).arg(!g_treeRows.isNull()));
+}
+
+void publishSelfTalk() {
+    if (g_userPanel) g_userPanel->setTalking(g_selfTalk.talking);
+    if (g_treeRows) g_treeRows->setSelfTalking(g_selfTalk.server, g_selfTalk.client, g_selfTalk.talking);
+}
+
+void bindSelfTalk(uint64 server, anyID client) {
+    if (server == g_selfTalk.server && client == g_selfTalk.client) return;
+    g_selfTalk = {server, client};
+}
+
+uint64 currentTalkServer() {
+    return g_funcs.getCurrentServerConnectionHandlerID ? g_funcs.getCurrentServerConnectionHandlerID() : 0;
+}
+
+// A temporary failure to resolve self should not clear a live indicator.
+// A different connection must establish its own identity from scratch.
+anyID resolveSelfTalkClient(uint64 server) {
+    int connectionStatus = STATUS_DISCONNECTED;
+    if (!server || (g_funcs.getConnectionStatus &&
+        g_funcs.getConnectionStatus(server, &connectionStatus) == ERROR_ok &&
+        connectionStatus < STATUS_CONNECTED)) {
+        bindSelfTalk(0, 0);
+        return 0;
+    }
+    if (server != g_selfTalk.server) bindSelfTalk(server, 0);
+    anyID client = 0;
+    if (!g_funcs.getClientID || g_funcs.getClientID(server, &client) != ERROR_ok || !client)
+        return 0;
+    bindSelfTalk(server, client);
+    return client;
+}
+
+bool isTalkingStatus(int status) {
+    return status == STATUS_TALKING || status == STATUS_TALKING_WHILE_DISABLED;
+}
+
+void refreshSelfTalk() {
+    const uint64 server = currentTalkServer();
+    const anyID client = resolveSelfTalkClient(server);
+    const bool tracing = talkTraceActive();
+    const bool protectedByCallback = SelfTalkState::Clock::now() < g_selfTalk.protectUntil;
+    int status = -1;
+    int result = -1;
+    int selfStatus = -1;
+    int selfResult = -1;
+    const bool hasSelfGetter = g_funcs.getClientSelfVariableAsInt != nullptr;
+    if (client && (!protectedByCallback || tracing)) {
+        // The generic client view can stay quiet even while our local capture
+        // is transmitting. Reconcile self with the local view whenever available.
+        if (hasSelfGetter) {
+            selfResult = int(g_funcs.getClientSelfVariableAsInt(server, CLIENT_FLAG_TALKING, &selfStatus));
+        }
+        if ((!hasSelfGetter || tracing) && g_funcs.getClientVariableAsInt) {
+            result = int(g_funcs.getClientVariableAsInt(server, client, CLIENT_FLAG_TALKING, &status));
+        }
+        const int talkResult = hasSelfGetter ? selfResult : result;
+        const int talkStatus = hasSelfGetter ? selfStatus : status;
+        if (!protectedByCallback && talkResult == ERROR_ok) g_selfTalk.talking = isTalkingStatus(talkStatus);
+    }
+    publishSelfTalk();
+    if (tracing) {
+        logTalkTrace(QStringLiteral("poll server=%1 client=%2 protected=%3 clientRc=%4 clientStatus=%5 selfRc=%6 selfStatus=%7 source=%8")
+            .arg(server).arg(client).arg(protectedByCallback).arg(result).arg(status).arg(selfResult).arg(selfStatus)
+            .arg(hasSelfGetter ? QLatin1String("self") : QLatin1String("client")));
+    }
+}
+
 void refreshClientStatesNow() {
+    refreshSelfTalk();
     if (!g_treeRows) return;
     g_treeRows->refreshStates();
     if (g_styledTree) g_styledTree->viewport()->update();
@@ -1858,6 +1950,11 @@ void onUiReady() {
                     .arg(qApp->palette().color(QPalette::Window).name()));
     }
     if (!g_guard) g_guard = new QObject(qApp);
+    if (qgetenv("FLAT_WHITE_SELF_TALK_TRACE") == "1") {
+        g_talkTraceStart = SelfTalkState::Clock::now();
+        g_talkTraceUntil = g_talkTraceStart + std::chrono::minutes(10);
+        logLine(QStringLiteral("self-talk trace enabled for 10 minutes"));
+    }
     if (!g_frameFilter) {
         g_frameFilter = new FrameFilter(qApp);
         qApp->installEventFilter(g_frameFilter);
@@ -1948,6 +2045,8 @@ void cleanupUi() {
     delete g_guard.data();
     g_guard = nullptr;
     g_connectionStatus.clear();
+    g_selfTalk = {};
+    g_talkTraceUntil = {};
 
     if (g_infoConn) { QObject::disconnect(g_infoConn); g_infoConn = QMetaObject::Connection(); }
     if (g_chatTabConn) { QObject::disconnect(g_chatTabConn); g_chatTabConn = QMetaObject::Connection(); }
@@ -1995,16 +2094,33 @@ extern "C" __declspec(dllexport) void ts3plugin_shutdown() {
 // Speech light must not wait for the polling heartbeat.
 extern "C" __declspec(dllexport) void ts3plugin_onTalkStatusChangeEvent(
     uint64 serverConnectionHandlerID, int status, int isReceivedWhisper, anyID clientID) {
-    Q_UNUSED(serverConnectionHandlerID);
     Q_UNUSED(isReceivedWhisper);
-    if (!qApp || !g_guard) return;
-    const bool talking = (status == STATUS_TALKING || status == STATUS_TALKING_WHILE_DISABLED);
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, talking] {
-        anyID self = 0;
-        if (g_funcs.getClientID) g_funcs.getClientID(serverConnectionHandlerID, &self);
-        if (clientID == self && g_userPanel) g_userPanel->setTalking(talking);
-        if (!g_treeRows) return;
-        g_treeRows->setTalking(static_cast<unsigned short>(clientID), QString(), talking);
+    if (!qApp || !g_guard || !clientID) return;
+    const auto arrived = SelfTalkState::Clock::now();
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, status, arrived] {
+        const uint64 activeServer = currentTalkServer();
+        const bool tracing = talkTraceActive();
+        const auto traceEvent = [&](const char* decision, anyID self) {
+            const auto queued = std::chrono::duration_cast<std::chrono::milliseconds>(
+                SelfTalkState::Clock::now() - arrived).count();
+            logTalkTrace(QStringLiteral("event server=%1 active=%2 client=%3 self=%4 status=%5 queuedMs=%6 decision=%7")
+                .arg(serverConnectionHandlerID).arg(activeServer).arg(clientID).arg(self)
+                .arg(status).arg(qlonglong(queued)).arg(QLatin1String(decision)));
+        };
+        if (activeServer != serverConnectionHandlerID) {
+            if (tracing && g_selfTalk.server == serverConnectionHandlerID && g_selfTalk.client == clientID)
+                traceEvent("inactive-server", g_selfTalk.client);
+            return;
+        }
+        const anyID self = resolveSelfTalkClient(serverConnectionHandlerID);
+        if (self && clientID == self) {
+            g_selfTalk.talking = isTalkingStatus(status);
+            g_selfTalk.protectUntil = SelfTalkState::Clock::now() + std::chrono::seconds(1);
+        } else if (self && g_treeRows) {
+            g_treeRows->setTalking(clientID, QString(), isTalkingStatus(status));
+        }
+        publishSelfTalk();
+        if (tracing && (!self || clientID == self)) traceEvent(self ? "applied" : "no-self", self);
         if (g_styledTree) g_styledTree->viewport()->update();
     }, Qt::QueuedConnection);
 }
@@ -2024,6 +2140,11 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
         case STATUS_CONNECTION_ESTABLISHING: text = QStringLiteral("正在进入服务器…"); break;
         case STATUS_CONNECTION_ESTABLISHED: text = QStringLiteral("已连接到服务器"); break;
         case STATUS_DISCONNECTED:
+            if (g_selfTalk.server == serverConnectionHandlerID) {
+                bindSelfTalk(0, 0);
+                publishSelfTalk();
+                if (g_styledTree) g_styledTree->viewport()->update();
+            }
             if (errorNumber != ERROR_ok) {
                 text = (previous == STATUS_CONNECTION_ESTABLISHED
                             ? QStringLiteral("与服务器的连接已断开：%1（错误码 %2）")

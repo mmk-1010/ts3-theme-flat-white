@@ -750,18 +750,11 @@ void UserPanel::refresh() {
         if (m_funcs.getClientVariableAsInt &&
             m_funcs.getClientVariableAsInt(h, self, CLIENT_AWAY, &v) == 0)
             m_away = m_selfChanges.resolve(CLIENT_AWAY, v != AWAY_NONE);
-        if (m_funcs.getClientVariableAsInt && m_funcs.getClientVariableAsInt(h, self, CLIENT_FLAG_TALKING, &v) == 0) {
-            // The heartbeat poll trails the talk event by up to 1.5s; do not
-            // let a stale read undo a fresh one.
-            if (QDateTime::currentMSecsSinceEpoch() - m_talkStamp >= 1000)
-                m_talking = v != 0;
-        }
     }
     update();
 }
 
 void UserPanel::setTalking(bool talking) {
-    m_talkStamp = QDateTime::currentMSecsSinceEpoch();
     if (m_talking == talking) return;
     m_talking = talking;
     update();
@@ -928,8 +921,9 @@ void NativeTreeRows::refresh() {
     m_outMuted.clear();
     m_self = 0;
 
-    if (!m_funcs.getCurrentServerConnectionHandlerID) return;
-    const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
+    const quint64 h = m_funcs.getCurrentServerConnectionHandlerID
+                          ? m_funcs.getCurrentServerConnectionHandlerID() : 0;
+    m_clientServer = h;
     if (h && m_funcs.getClientID) m_funcs.getClientID(h, &m_self);
     m_selfChanges.bind(h, m_self);
     if (!h) return;
@@ -1011,7 +1005,8 @@ void NativeTreeRows::refresh() {
                 m_clientIds.insert(stripClientTag(name), id);
 
                 int v = 0;
-                if (m_funcs.getClientVariableAsInt &&
+                if (id != m_self && !(h == m_selfTalkServer && id == m_selfTalkClient) &&
+                    m_funcs.getClientVariableAsInt &&
                     m_funcs.getClientVariableAsInt(h, id, CLIENT_FLAG_TALKING, &v) == 0)
                     pollTalking(stripClientTag(name), v != 0);
                 if (m_funcs.getClientVariableAsInt &&
@@ -1045,8 +1040,13 @@ void NativeTreeRows::setTalking(unsigned short clientId, const QString& displayN
     m_talkStamp[stripClientTag(name)] = QDateTime::currentMSecsSinceEpoch();
 }
 
-// The 600ms poll reports stale talk state while a burst is in flight; a value
-// that would undo an event from the last second is ignored.
+void NativeTreeRows::setSelfTalking(quint64 server, unsigned short client, bool talking) {
+    m_selfTalkServer = server;
+    m_selfTalkClient = client;
+    m_selfTalking = talking;
+}
+
+// The heartbeat can read stale talk state immediately after a remote event.
 void NativeTreeRows::pollTalking(const QString& name, bool talking) {
     const qint64 last = m_talkStamp.value(name, 0);
     if (QDateTime::currentMSecsSinceEpoch() - last < 1000 &&
@@ -1082,8 +1082,6 @@ void NativeTreeRows::refreshStates() {
         const unsigned short id = *c;
         int v = 0;
         if (m_funcs.getClientVariableAsInt) {
-            // CLIENT_FLAG_TALKING lags behind onTalkStatusChangeEvent; only
-            // write it when no name is cached for this client yet.
             if (m_funcs.getClientVariableAsInt(h, id, CLIENT_AWAY, &v) == 0)
                 pollClientState(id, CLIENT_AWAY, v != AWAY_NONE);
             if (m_funcs.getClientVariableAsInt(h, id, CLIENT_INPUT_MUTED, &v) == 0)
@@ -1320,7 +1318,9 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     // Client row: circle instead of an avatar; lights up while talking.
     const QString name = stripClientTag(raw);
     const unsigned short id = clientIdFor(name);
-    const bool talking = m_talking.value(name, false);
+    const bool matchesSelfTalk = id && m_clientServer == m_selfTalkServer && id == m_selfTalkClient;
+    const bool isSelf = matchesSelfTalk || (id && id == m_self);
+    const bool talking = isSelf ? matchesSelfTalk && m_selfTalking : m_talking.value(name, false);
     const bool away = m_away.value(id, false);
     const bool muted = m_inMuted.value(id, false);
     const bool outMuted = m_outMuted.value(id, false);

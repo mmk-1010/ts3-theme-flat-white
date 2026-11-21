@@ -193,7 +193,6 @@ private:
     bool m_outputMuted = false;
     bool m_away = false;
     bool m_talking = false;
-    qint64 m_talkStamp = 0;
     SelfStateChanges m_selfChanges;
     std::function<void(quint64, unsigned short, int, bool)> m_stateChange;
     std::function<void(quint64, int, unsigned int)> m_error;
@@ -215,6 +214,7 @@ public:
     void refreshStates();
     void setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local);
     void setTalking(unsigned short clientId, const QString& displayName, bool talking);
+    void setSelfTalking(quint64 server, unsigned short client, bool talking);
     bool isClientRow(const QModelIndex& index) const { return kindOf(index) == ClientRow; }
     QString clientStatus(const QModelIndex& index) const;
     // Public so the send path can resolve a private tab's peer from its name.
@@ -246,6 +246,10 @@ private:
     // built from a stale name map can.
     QHash<QString, bool> m_talking;
     QHash<QString, qint64> m_talkStamp;
+    quint64 m_clientServer = 0;
+    quint64 m_selfTalkServer = 0;
+    unsigned short m_selfTalkClient = 0;
+    bool m_selfTalking = false;
     QHash<unsigned short, bool> m_away;
     QHash<unsigned short, bool> m_inMuted;
     QHash<unsigned short, bool> m_outMuted;
