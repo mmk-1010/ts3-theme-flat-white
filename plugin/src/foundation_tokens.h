@@ -56,12 +56,12 @@ enum class Color {
 
 inline constexpr QRgb colors[][2] = {
     {0xF2F2F2, 0x1B1B1B},  // bgCanvas
-    {0xFAFAFA, 0x232323},  // bgSurface
+    {0xF5F5F5, 0x232323},  // bgSurface
     {0xECECEC, 0x1E1E1E},  // bgSidebar
-    {0xFFFFFF, 0x2D2D2D},  // bgControl
-    {0xFFFFFF, 0x292929},  // bgInput
-    {0xFFFFFF, 0x2D2D2D},  // bgInputFocus
-    {0xFFFFFF, 0x2B2B2B},  // bgOverlay
+    {0xF5F5F5, 0x2D2D2D},  // bgControl
+    {0xF2F2F2, 0x292929},  // bgInput
+    {0xF5F5F5, 0x2D2D2D},  // bgInputFocus
+    {0xF5F5F5, 0x2B2B2B},  // bgOverlay
     {0xECECEC, 0x333333},  // fillHover
     {0xE2E2E2, 0x3D3D3D},  // fillPressed
     {0xE4E4E4, 0x363636},  // fillSelected

@@ -6,10 +6,10 @@
  *
  * QPalette::Window = #F2F2F2;
  * QPalette::WindowText = #252525;
- * QPalette::Base = #FAFAFA;
+ * QPalette::Base = #F5F5F5;
  * QPalette::AlternateBase = #ECECEC;
  * QPalette::Text = #252525;
- * QPalette::Button = #FFFFFF;
+ * QPalette::Button = #F5F5F5;
  * QPalette::ButtonText = #252525;
  * QPalette::BrightText = #FFFFFF;
  * QPalette::Highlight = #555555;
@@ -95,7 +95,7 @@ QLabel#bookmarksBanner,
 QLabel#identitiesBanner,
 QLabel#accountLoginBanner,
 QLabel#accountCreateBanner {
-	background: #FAFAFA;
+	background: #F5F5F5;
 	border-bottom: 1px solid #DDDDDD;
 	color: #252525;
 	padding-left: 12px;
@@ -136,7 +136,7 @@ QMenuBar::item:pressed {
 }
 
 QMenu {
-	background-color: #FFFFFF;
+	background-color: #F5F5F5;
 	color: #252525;
 	border: 1px solid #D7D7D7;
 	border-radius: 8px;
@@ -166,7 +166,7 @@ QMenu::separator {
 }
 
 QToolBar {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border: none;
 	border-bottom: 1px solid #DDDDDD;
 	spacing: 2px;
@@ -232,7 +232,7 @@ QToolButton:disabled {
 /* ------------------------------------------------------------------ */
 
 QPushButton {
-	background-color: #FFFFFF;
+	background-color: #F5F5F5;
 	color: #252525;
 	border: 1px solid #C9C9C9;
 	border-radius: 4px;
@@ -294,7 +294,7 @@ QPushButton:checked:focus:enabled {
 /* ------------------------------------------------------------------ */
 
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-	background-color: #FFFFFF;
+	background-color: #F2F2F2;
 	color: #252525;
 	border: 1px solid #C9C9C9;
 	border-radius: 4px;
@@ -317,7 +317,7 @@ QAbstractSpinBox QLineEdit, QComboBox QLineEdit {
 
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-	background-color: #FFFFFF;
+	background-color: #F5F5F5;
 	border-color: #0B7068;
 }
 
@@ -333,7 +333,7 @@ QComboBox::drop-down {
 }
 
 QComboBox QAbstractItemView {
-	background-color: #FFFFFF;
+	background-color: #F5F5F5;
 	color: #252525;
 	border: 1px solid #D7D7D7;
 	border-radius: 8px;
@@ -419,7 +419,7 @@ QTreeView#ServerTreeView {
 }
 
 QTreeView {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 	outline: none;
@@ -490,9 +490,9 @@ QTreeView::branch:has-children:open:hover {
 /* ------------------------------------------------------------------ */
 
 QListView, QTableView, QTableWidget {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	color: #252525;
-	alternate-background-color: #FAFAFA;
+	alternate-background-color: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 	gridline-color: #DDDDDD;
@@ -527,7 +527,7 @@ QHeaderView {
 }
 
 QHeaderView::section {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	color: #535353;
 	border: none;
 	border-bottom: 1px solid #DDDDDD;
@@ -543,7 +543,7 @@ QTabWidget::pane {
 	border: none;
 	border-top: 1px solid #DDDDDD;
 	top: -1px;
-	background: #FAFAFA;
+	background: #F5F5F5;
 }
 
 QTabBar {
@@ -553,7 +553,7 @@ QTabBar {
 /* Blend the chat tabs into the chat surface without a native baseline. */
 QTabBar#ChatTabBar {
 	qproperty-drawBase: false;
-	background: #FAFAFA;
+	background: #F5F5F5;
 }
 
 QTabBar::tab {
@@ -610,7 +610,7 @@ QTabBar::close-button {
 /* ------------------------------------------------------------------ */
 
 QWidget#MainWindowChatWidget, QWidget#FlatCardHost {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 }
 
 QTabWidget#ChatTabWidget::pane {
@@ -620,7 +620,7 @@ QTabWidget#ChatTabWidget::pane {
 }
 
 QTextEdit#InfoFrame {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 	padding: 8px;
@@ -634,7 +634,7 @@ QTextEdit#InfoFrame {
 }
 
 QTextEdit#ChatTab {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 	color: #252525;
@@ -643,7 +643,7 @@ QTextEdit#ChatTab {
 }
 
 QTextEdit#ChatLineEdit {
-	background-color: #FFFFFF;
+	background-color: #F2F2F2;
 	border: 1px solid #C9C9C9;
 	border-bottom-color: #A0A0A0;
 	border-radius: 4px;
@@ -657,7 +657,7 @@ QTextEdit#ChatLineEdit {
 }
 
 QTextEdit#ChatLineEdit:focus {
-	background-color: #FFFFFF;
+	background-color: #F5F5F5;
 	border-color: #C9C9C9;
 	border-bottom-color: #A0A0A0;
 }
@@ -709,7 +709,7 @@ QListView::indicator {
 	height: 16px;
 	border: 1px solid #A0A0A0;
 	border-radius: 4px;
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 }
 
 QCheckBox::indicator:hover,
@@ -732,7 +732,7 @@ QCheckBox::indicator:disabled,
 QTreeView::indicator:disabled,
 QTableView::indicator:disabled,
 QListView::indicator:disabled {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border-color: #E4E4E4;
 }
 
@@ -749,17 +749,17 @@ QRadioButton::indicator {
 	height: 15px;
 	border: 1px solid #A0A0A0;
 	border-radius: 8px;
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 }
 
 QRadioButton::indicator:checked {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border: 5px solid #0B7068;
 }
 
 QRadioButton::indicator:disabled {
 	border-color: #E4E4E4;
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 }
 
 /* ------------------------------------------------------------------ */
@@ -795,7 +795,7 @@ QSlider::sub-page:horizontal {
 }
 
 QSlider::handle:horizontal {
-	background: #FAFAFA;
+	background: #F5F5F5;
 	border: 1px solid #A0A0A0;
 	width: 14px;
 	height: 14px;
@@ -847,7 +847,7 @@ QProgressBar::chunk {
 /* ------------------------------------------------------------------ */
 
 QStatusBar {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border-top: 1px solid #DDDDDD;
 	color: #535353;
 }
@@ -889,7 +889,7 @@ QLabel#appNameLabel {
 }
 
 QWidget#HeadlineLabel {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 	border-bottom: 1px solid #DDDDDD;
 }
 
@@ -904,20 +904,20 @@ com--teamspeak--ui--ServerIntegrationsWidget QWidget#AvailableServerIntegration 
 }
 
 com--teamspeak--ui--ServerIntegrationsWidget com--teamspeak--ui--IntegrationResponseWidget {
-	background: #FAFAFA;
+	background: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 }
 
 com--teamspeak--ui--ServerIntegrationsWidget com--teamspeak--ui--IntegrationBubble {
-	background: #FAFAFA;
+	background: #F5F5F5;
 	border: 1px solid #DDDDDD;
 	border-radius: 8px;
 }
 
 com--teamspeak--ui--IntegrationBubbleEditable QComboBox#IntegrationBubbleEditableComboBox {
 	border: 1px solid #C9C9C9;
-	background: #FAFAFA;
+	background: #F5F5F5;
 	border-radius: 4px;
 	padding: 2px 9px;
 }

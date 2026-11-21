@@ -148,7 +148,7 @@ p {
 }
 
 .InfoFrame_Chip {
-	background-color: #FAFAFA;
+	background-color: #F5F5F5;
 }
 
 .InfoFrame_Body {
