@@ -20,8 +20,8 @@
 
 到[最新发布](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest)页面下载：
 
-- **浅色**：选 Flat White 包
-- **深色**：选 Flat Dark 包
+- **浅色**：[下载 Flat White](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White.zip)
+- **深色**：[下载 Flat Dark](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark.zip)
 
 两个包都含主题、图标和插件，插件是同一个，装哪个都一样。
 音效是可选的，单独下载

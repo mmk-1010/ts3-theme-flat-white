@@ -24,8 +24,8 @@ floating user card and free window resizing.
 Grab the archive you want from the
 [latest release](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest):
 
-- **Light**: pick the Flat White archive
-- **Dark**: pick the Flat Dark archive
+- **Light**: [download Flat White](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White.zip)
+- **Dark**: [download Flat Dark](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark.zip)
 
 Both contain the theme, the icons and the plugin — it is the same plugin either way.
 Sounds are optional and downloaded separately as
