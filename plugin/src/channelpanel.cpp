@@ -1742,9 +1742,10 @@ void ModernChat::applyTheme() {
 }
 
 void ModernChat::scrollToLatest() {
-    if (count() == 0) return;
     m_followBottom = true;
     m_savedOffset = -1;
+    if (count() == 0) return;
+
     // Rows are sized by the delegate, so right after a rebuild the scrollbar
     // range is still 0 and scrollToBottom() has nothing to scroll to - the
     // list then sits at the top of the history and addMessage()'s "am I at the

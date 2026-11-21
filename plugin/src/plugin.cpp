@@ -96,9 +96,8 @@ QPointer<QObject> g_chatFilter;
 QPointer<QWidget> g_chatLog;
 QHash<QString, QVector<ChatMessage>> g_chatHistory;
 QHash<uint64, int> g_connectionStatus;
-// Scroll offset per conversation; -1 means the reader was at the bottom.
-// Kept across tab switches (and the client's own page flips) so coming back to
-// a conversation does not jump.
+// Saved channel and private chat offsets; -1 means the reader was at the bottom.
+// The server log opens at the newest event.
 QHash<QString, int> g_chatScroll;
 QString g_overlayKey;
 // Conversation the visible notification card belongs to. Cleared as soon as
@@ -1290,6 +1289,12 @@ void updateChatOverlay() {
         auto* mc = new ModernChat(g_chatTab);
         mc->hide();
         g_modernChat = mc;
+        g_overlayKey.clear();
+        // currentChanged does not fire when the selected server tab is clicked.
+        QObject::connect(g_chatTab->tabBar(), &QTabBar::tabBarClicked, mc, [mc](int index) {
+            if (index == 0 && g_chatTab->currentIndex() == 0 && !mc->isHidden())
+                mc->scrollToLatest();
+        });
         auto* filter = new OverlayFilter(g_chatTab);
         filter->onLayout = [] { updateChatOverlay(); };
         g_chatTab->installEventFilter(filter);
@@ -1360,12 +1365,13 @@ void updateChatOverlay() {
     // Re-geometry every heartbeat made the chat input repaint mid-typing.
     // Only touch the overlay when its target rectangle actually changed.
     const QRect target(log->mapTo(g_chatTab, QPoint(0, 0)), log->size());
+    const bool revealingLog = g_modernChat->isHidden();
     if (g_modernChat->geometry() != target) g_modernChat->setGeometry(target);
-    if (!g_modernChat->isVisible()) g_modernChat->show();
+    if (revealingLog) g_modernChat->show();
 
     if (g_overlayKey != key) {
-        // Remember where the conversation being left was scrolled to.
-        if (!g_overlayKey.isEmpty())
+        // Remember where the channel or private conversation being left was scrolled to.
+        if (!g_overlayKey.isEmpty() && !g_overlayKey.startsWith(QLatin1String("s:")))
             g_chatScroll[g_overlayKey] =
                 g_modernChat->isFollowingBottom() ? -1 : g_modernChat->scrollOffset();
         g_overlayKey = key;
@@ -1383,7 +1389,9 @@ void updateChatOverlay() {
         }
         g_modernChat->setEmptyText(serverTab ? QStringLiteral("暂无服务器事件")
                                              : QStringLiteral("这里还没有消息，来打个招呼吧"));
-        g_modernChat->setMessages(messages, g_chatScroll.value(key, -1));
+        g_modernChat->setMessages(messages, serverTab ? -1 : g_chatScroll.value(key, -1));
+    } else if (serverTab && revealingLog) {
+        g_modernChat->scrollToLatest();
     }
 }
 

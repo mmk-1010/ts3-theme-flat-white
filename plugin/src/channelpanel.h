@@ -272,6 +272,7 @@ public:
     // Rebuilds the list. keepOffset < 0 puts the newest message in view;
     // otherwise the view is restored to that pixel offset.
     void setMessages(const QVector<ChatMessage>& msgs, int keepOffset = -1);
+    void scrollToLatest();
     int scrollOffset() const;
     bool isFollowingBottom() const { return m_followBottom; }
     void setEmptyText(const QString& text) { m_emptyText = text; }
@@ -300,7 +301,6 @@ private:
         int row = -1;
         int pos = 0;
     };
-    void scrollToLatest();
     TextPos positionAt(const QPoint& viewportPos) const;
     void selectTo(const TextPos& p);
     void clearTextSelection();

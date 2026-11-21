@@ -168,6 +168,70 @@ private slots:
         QCOMPARE(window.hint->size(), stableHint);
     }
 
+    void widerTrackWorksWithNativeClicksAndDrag_data() {
+        QTest::addColumn<QString>("theme");
+        QTest::newRow("light") << QStringLiteral("../../src/styles/flat_white.qss");
+        QTest::newRow("dark") << QStringLiteral("../../src/styles/flat_dark.qss");
+    }
+
+    void widerTrackWorksWithNativeClicksAndDrag() {
+        QFETCH(QString, theme);
+        const QString path = QFINDTESTDATA(theme);
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        FrameFilter filter;
+        UserVolumeWidget window(-20);
+        window.setStyleSheet(QString::fromUtf8(file.readAll()));
+        window.installEventFilter(&filter);
+        window.show();
+        settle(window);
+        QSlider* slider = window.slider;
+        const QSize dialogSize = window.size();
+        const QRect sliderGeometry = slider->geometry();
+        const auto subControlRect = [slider](QStyle::SubControl control) {
+            QStyleOptionSlider option;
+            option.initFrom(slider);
+            option.orientation = Qt::Horizontal;
+            option.minimum = slider->minimum();
+            option.maximum = slider->maximum();
+            option.sliderPosition = slider->sliderPosition();
+            option.sliderValue = slider->value();
+            option.subControls = QStyle::SC_SliderGroove | QStyle::SC_SliderHandle;
+            option.state |= QStyle::State_Horizontal;
+            return slider->style()->subControlRect(QStyle::CC_Slider, &option, control, slider);
+        };
+        const QRect groove = subControlRect(QStyle::SC_SliderGroove);
+        QVERIFY(groove.height() >= 20);
+        const int right = groove.left() + groove.width() * 3 / 4;
+        for (int y : {groove.top() + 2, groove.bottom() - 2}) {
+            slider->setValue(-20);
+            const QPoint point(right, y);
+            QVERIFY(slider->rect().contains(point));
+            QVERIFY(!subControlRect(QStyle::SC_SliderHandle).contains(point));
+            QTest::mouseClick(slider, Qt::LeftButton, Qt::NoModifier, point);
+            QVERIFY(slider->value() > -20);
+            settle(window);
+            QCOMPARE(window.size(), dialogSize);
+            QCOMPARE(slider->geometry(), sliderGeometry);
+        }
+
+        slider->setValue(-20);
+        const QPoint handle = subControlRect(QStyle::SC_SliderHandle).center();
+        QTest::mousePress(slider, Qt::LeftButton, Qt::NoModifier, handle);
+        QVERIFY(slider->isSliderDown());
+        const QPoint end(groove.left() + groove.width() * 9 / 10, handle.y());
+        QMouseEvent move(QEvent::MouseMove, QPointF(end), QPointF(slider->mapToGlobal(end)),
+                         Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(slider, &move);
+        QVERIFY(slider->value() > 6);
+        QCOMPARE(window.valueLabel->text(), QStringLiteral("%1 dB").arg(slider->value()));
+        QTest::mouseRelease(slider, Qt::LeftButton, Qt::NoModifier, end);
+        QVERIFY(!slider->isSliderDown());
+        settle(window);
+        QCOMPARE(window.size(), dialogSize);
+        QCOMPARE(slider->geometry(), sliderGeometry);
+    }
+
     void repeatedCallsPreserveFirstReservation() {
         UserVolumeWidget window;
         stabilizeVolumeDialog(&window);

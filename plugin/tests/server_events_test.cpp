@@ -382,6 +382,95 @@ private slots:
         QCOMPARE(m_chat->rowPlainText(1), QStringLiteral("Other again 编辑了频道 服务器乙频道"));
     }
 
+    void serverTabOpensAtLatestAndPreservesManualReading() {
+        using namespace server_events_mock;
+        const uint64 channelId = 31;
+        g_funcs.getChannelOfClient = [](uint64, anyID, uint64* result) -> unsigned int {
+            *result = 31;
+            return ERROR_ok;
+        };
+        channels[channelKey(server, channelId)] = QStringLiteral("Channel");
+
+        const QString serverHistory = serverKey(server);
+        const QString channelHistory = channelKey(server, channelId);
+        const QString privateHistory = QStringLiteral("p:Peer");
+        for (const QString& key : {serverHistory, channelHistory, privateHistory}) {
+            for (int i = 0; i < 40; ++i)
+                g_chatHistory[key].append(systemMessage(QStringLiteral("%1 message %2").arg(key).arg(i)));
+        }
+
+        // Use the production tab and info-page wiring, independent of heartbeat.
+        g_modernChat = nullptr;
+        QWidget host;
+        auto* layout = new QVBoxLayout(&host);
+        auto* tabs = new QTabWidget(&host);
+        tabs->setObjectName(QStringLiteral("ChatTabWidget"));
+        tabs->addTab(new QWidget, QStringLiteral("Server"));
+        tabs->addTab(new QWidget, QStringLiteral("Channel"));
+        tabs->addTab(new QWidget, QStringLiteral("Peer"));
+        layout->addWidget(tabs);
+        auto* info = new QWidget(&host);
+        info->setObjectName(QStringLiteral("InfoFrame"));
+        host.resize(520, 330);
+        host.show();
+        installInfoTab();
+        updateChatOverlay();
+        drain();
+        QVERIFY(g_modernChat && g_modernChat->isVisible());
+        auto* scroll = g_modernChat->verticalScrollBar();
+        QVERIFY(scroll->maximum() > 200);
+        QCOMPARE(scroll->value(), scroll->maximum());
+        QCOMPARE(g_modernChat->rowPlainText(39), serverHistory + QStringLiteral(" message 39"));
+
+        scroll->setValue(80);
+        appendSystemMessage(server, QStringLiteral("New server event"));
+        updateChatOverlay();
+        drain();
+        QCOMPARE(scroll->value(), 80);
+        QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier,
+                          tabs->tabBar()->tabRect(0).center());
+        drain();
+        QCOMPARE(scroll->value(), scroll->maximum());
+        QCOMPARE(g_modernChat->rowPlainText(40), QStringLiteral("New server event"));
+
+        scroll->setValue(80);
+        tabs->setCurrentIndex(1);
+        drain();
+        QCOMPARE(g_overlayKey, channelHistory);
+        scroll->setValue(90);
+        tabs->setCurrentIndex(2);
+        drain();
+        QCOMPARE(g_overlayKey, privateHistory);
+        scroll->setValue(120);
+        QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier,
+                          tabs->tabBar()->tabRect(0).center());
+        drain();
+        QCOMPARE(tabs->currentIndex(), 0);
+        QCOMPARE(scroll->value(), scroll->maximum());
+
+        for (bool useTab : {true, false}) {
+            scroll->setValue(80);
+            showInfoPage();
+            QVERIFY(g_modernChat->isHidden());
+            appendSystemMessage(server, QStringLiteral("Event behind info"));
+            if (useTab)
+                QTest::mouseClick(tabs->tabBar(), Qt::LeftButton, Qt::NoModifier,
+                                  tabs->tabBar()->tabRect(0).center());
+            else
+                QTest::mouseClick(g_infoBack, Qt::LeftButton);
+            drain();
+            QVERIFY(g_modernChat->isVisible());
+            QCOMPARE(scroll->value(), scroll->maximum());
+        }
+
+        tabs->setCurrentIndex(1);
+        drain();
+        QCOMPARE(scroll->value(), 90);
+        tabs->setCurrentIndex(2);
+        drain();
+        QCOMPARE(scroll->value(), 120);
+    }
+
     void serverErrorsCopyPayloadAndReturnZero_data() {
         QTest::addColumn<bool>("tagged");
         QTest::newRow("null-return-code") << false;

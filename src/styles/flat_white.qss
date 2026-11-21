@@ -725,6 +725,27 @@ QSlider::handle:horizontal:hover {
 	border-color: #0F766E;
 }
 
+/* Qt hit-tests the groove itself, so expand it in the user volume dialog. */
+UserVolumeWidget QSlider:horizontal {
+	min-height: 24px;
+}
+
+UserVolumeWidget QSlider::groove:horizontal {
+	height: 20px;
+	border-radius: 10px;
+}
+
+UserVolumeWidget QSlider::sub-page:horizontal {
+	border-radius: 10px;
+}
+
+UserVolumeWidget QSlider::handle:horizontal {
+	width: 18px;
+	height: 18px;
+	margin: -2px 0;
+	border-radius: 9px;
+}
+
 QProgressBar {
 	background-color: #F1F2F5;
 	border: none;
