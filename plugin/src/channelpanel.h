@@ -54,7 +54,7 @@ inline QColor green() { return color(foundation::Color::statusSuccess); }
 inline QColor divider() { return color(foundation::Color::strokeDivider); }
 inline QColor accent() { return color(foundation::Color::accent); }
 inline QColor danger() { return color(foundation::Color::statusDanger); }
-inline QColor awayColor() { return color(foundation::Color::statusWarning); }
+inline QColor awayColor() { return color(foundation::Color::statusAway); }
 inline QColor card() { return color(foundation::Color::bgOverlay); }
 inline QColor cardEdge() { return color(foundation::Color::strokeOverlay); }
 inline QColor bubbleOther() { return color(foundation::Color::bgBubbleOther); }

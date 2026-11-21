@@ -41,6 +41,7 @@ enum class Color {
     statusSuccess,
     statusDanger,
     statusWarning,
+    statusAway,
     textDanger,
     textWarning,
     fillDanger,
@@ -89,6 +90,7 @@ inline constexpr QRgb colors[][2] = {
     {0x16754B, 0x55D795},  // statusSuccess
     {0xB4232C, 0xFF8589},  // statusDanger
     {0x8E5A00, 0xF4C360},  // statusWarning
+    {0xAD8000, 0xF4C360},  // statusAway
     {0xB4232C, 0xFF8589},  // textDanger
     {0x8E5A00, 0xF4C360},  // textWarning
     {0xB4232C, 0x8C2830},  // fillDanger
