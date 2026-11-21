@@ -20,6 +20,7 @@
 #include <QPen>
 #include <QPointer>
 #include <QResizeEvent>
+#include <QScopedValueRollback>
 #include <QSlider>
 #include <QScrollBar>
 #include <QStyle>
@@ -32,7 +33,11 @@
 #include <memory>
 #include <vector>
 
+#include "foundation_motion.h"
+
 namespace {
+
+using foundation::Color;
 
 bool g_darkPalette = false;
 
@@ -65,9 +70,7 @@ void drawAvatar(QPainter& p, const QRectF& rect, const QString& name, bool ring,
     p.setPen(Qt::NoPen);
     p.setBrush(avatarColor(name));
     p.drawEllipse(rect);
-    QFont f(QStringLiteral("Microsoft YaHei UI"), int(rect.height() * 0.42));
-    f.setWeight(QFont::DemiBold);
-    p.setFont(f);
+    p.setFont(discord::font(qRound(rect.height() * 0.56), QFont::DemiBold));
     p.setPen(Qt::white);
     p.drawText(rect, Qt::AlignCenter, initialOf(name));
     p.restore();
@@ -172,7 +175,7 @@ QPainterPath mutedAudioShape(MutedAudio audio) {
 void drawMutedAudioBadge(QPainter& p, const QPointF& topLeft, MutedAudio audio) {
     static const QPainterPath micShape = mutedAudioShape(MutedAudio::Microphone);
     static const QPainterPath speakerShape = mutedAudioShape(MutedAudio::Speaker);
-    const QColor ink = discord::isDark() ? QColor(0xFF, 0x75, 0x78) : QColor(0xC6, 0x32, 0x36);
+    const QColor ink = discord::color(Color::badgeMute);
 
     p.save();
     p.translate(topLeft);
@@ -497,11 +500,9 @@ void ChannelSidebar::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing, true);
     p.fillRect(rect(), discord::sidebar());
 
-    QFont serverFont(QStringLiteral("Microsoft YaHei UI"), 12);
-    serverFont.setWeight(QFont::DemiBold);
-    QFont rowFont(QStringLiteral("Microsoft YaHei UI"), 10);
-    QFont sectionFont(QStringLiteral("Microsoft YaHei UI"), 9);
-    sectionFont.setWeight(QFont::DemiBold);
+    const QFont serverFont = discord::font(foundation::bodyLargeSize, QFont::DemiBold);
+    const QFont rowFont = discord::font(foundation::bodySize);
+    const QFont sectionFont = discord::font(foundation::captionSize, QFont::DemiBold);
 
     p.setFont(serverFont);
     p.setPen(discord::ink());
@@ -649,35 +650,84 @@ void ChannelSidebar::mouseDoubleClickEvent(QMouseEvent* e) {
 // ================================================================ UserPanel
 
 namespace {
-// The user strip is a floating card, not a full-width bar: 6px on every
-// side, matching the 6px inset of the channel-row highlight cards and the
-// bottom gap. 10px of padding inside for the avatar and the button group.
-// Painting and hit testing share these numbers.
-constexpr int kUserCardInsetX = 6;
-constexpr int kUserCardInsetY = 6;
-constexpr int kUserCardRadius = 8;
+// Geometry shared by the floating user card and its toggles.
+constexpr int kUserCardInset = 6;
 constexpr int kUserPad = 10;
-constexpr int kUserBtnSize = 24;
+// Keep the three inline glyph buttons compact in the narrow sidebar.
+constexpr int kUserBtnSize = foundation::gapSection;
 constexpr int kUserBtnGap = 2;
+constexpr int kUserAvatarSize = 30;
+constexpr int kUserGlyphSize = 16;
+
+QColor mixUserColor(const QColor& from, const QColor& to, qreal amount) {
+    const qreal rest = 1 - amount;
+    return QColor::fromRgbF(from.redF() * rest + to.redF() * amount,
+                            from.greenF() * rest + to.greenF() * amount,
+                            from.blueF() * rest + to.blueF() * amount);
+}
 }  // namespace
 
-UserPanel::UserPanel(QWidget* parent) : QWidget(parent) { setMouseTracking(true); }
+UserPanel::UserPanel(QWidget* parent) : QWidget(parent) {
+    setMouseTracking(true);
+    m_pointerMotion.setDuration(foundation::motionDuration);
+    m_pointerMotion.setEasingCurve(foundation::motionEasing());
+    m_pointerMotion.setStartValue(0.0);
+    m_pointerMotion.setEndValue(1.0);
+    connect(&m_pointerMotion, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant& value) { updatePointerVisuals(value.toReal()); });
+}
 
-// 24px buttons, 2px gaps, and 10px of padding inside the rounded card.
-// Returns integer-aligned rects so the 16px glyphs land on the pixel grid.
+// Painting and hit testing use the same integer-aligned button rectangles.
 QRectF UserPanel::buttonRect(int index) const {
-    const int group = 3 * kUserBtnSize + 2 * kUserBtnGap;
-    const int left = width() - kUserCardInsetX - kUserPad - group +
+    const int group = kButtonCount * kUserBtnSize + (kButtonCount - 1) * kUserBtnGap;
+    const int left = width() - kUserCardInset - kUserPad - group +
                      index * (kUserBtnSize + kUserBtnGap);
     const int top = (height() - kUserBtnSize) / 2;
     return QRectF(left, top, kUserBtnSize, kUserBtnSize);
 }
 
 int UserPanel::buttonAt(const QPoint& pos) const {
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < kButtonCount; ++i) {
         if (buttonRect(i).contains(QPointF(pos))) return i;
     }
     return -1;
+}
+
+void UserPanel::setPointerState(int hover, int pressed, bool snap) {
+    const bool hoverChanged = hover != m_hover;
+    const int oldPressTarget = m_pressed == m_hover ? m_pressed : -1;
+    const int pressTarget = pressed == hover ? pressed : -1;
+    m_pressed = pressed;
+    if (hoverChanged) {
+        m_hover = hover;
+        if (hover >= 0) setCursor(Qt::PointingHandCursor);
+        else unsetCursor();
+    }
+    if (!hoverChanged && pressTarget == oldPressTarget && !snap) return;
+
+    // Retarget all buttons from their current values, including ones fading out.
+    m_pointerMotion.stop();
+    m_visualStart = m_visuals;
+    if (snap || !foundation::animationsEnabled()) {
+        updatePointerVisuals(1);
+        return;
+    }
+    m_pointerMotion.start();
+}
+
+void UserPanel::updatePointerVisuals(qreal progress) {
+    QRect dirty;
+    const qreal remaining = 1 - progress;
+    for (int i = 0; i < kButtonCount; ++i) {
+        const qreal hover = m_visualStart[i].hover * remaining + (m_hover == i ? progress : 0);
+        const qreal press = m_visualStart[i].press * remaining +
+                            (m_pressed == i && m_hover == i ? progress : 0);
+        auto& visual = m_visuals[i];
+        if (visual.hover == hover && visual.press == press) continue;
+        visual = {hover, press};
+        dirty = dirty.united(buttonRect(i).toAlignedRect());
+    }
+    if (!dirty.isEmpty()) update(dirty);
 }
 
 bool UserPanel::buttonActive(int index) const {
@@ -766,62 +816,73 @@ void UserPanel::paintEvent(QPaintEvent*) {
     // Floating rounded card; the widget itself stays transparent around it so
     // the sidebar bottom shows through instead of a hard full-width strip.
     // The half-pixel offset keeps the hairline border crisp.
-    const QRectF card = QRectF(rect()).adjusted(kUserCardInsetX + 0.5, kUserCardInsetY + 0.5,
-                                                -kUserCardInsetX - 0.5, -kUserCardInsetY - 0.5);
+    const qreal inset = kUserCardInset + 0.5;
+    const QRectF card = QRectF(rect()).adjusted(inset, inset, -inset, -inset);
     const QColor fill = discord::card();
     p.setPen(QPen(discord::cardEdge(), 1));
     p.setBrush(fill);
-    p.drawRoundedRect(card, kUserCardRadius, kUserCardRadius);
+    p.drawRoundedRect(card, foundation::radiusOverlay, foundation::radiusOverlay);
 
-    const int rowCenter = height() / 2;
-
-    const QRectF av(kUserCardInsetX + kUserPad, rowCenter - 15, 30, 30);
+    const qreal rowCenter = buttonRect(0).center().y();
+    const QRectF av(kUserCardInset + kUserPad, rowCenter - kUserAvatarSize / 2.0,
+                    kUserAvatarSize, kUserAvatarSize);
     drawAvatar(p, av, m_name.isEmpty() ? QStringLiteral("?") : m_name, m_talking, discord::green());
 
     p.setPen(QPen(fill, 2));
     p.setBrush((m_inputMuted || m_away) ? discord::faint() : discord::green());
     p.drawEllipse(QRectF(av.right() - 9, av.bottom() - 9, 9, 9));
 
-    QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 10);
-    nameFont.setWeight(QFont::DemiBold);
-    p.setFont(nameFont);
-    p.setPen(m_away ? discord::muted() : discord::ink());
-    const QFontMetrics fm(nameFont);
-    const QString displayName = m_name.isEmpty() ? QStringLiteral("未连接") : m_name;
-    const int nameLeft = kUserCardInsetX + kUserPad + 30 + 8;
-    const int nameRight = static_cast<int>(buttonRect(0).left()) - 8;
-    p.drawText(QRect(nameLeft, rowCenter - 16, nameRight - nameLeft, 18),
-               Qt::AlignLeft | Qt::AlignVCenter,
-               fm.elidedText(displayName, Qt::ElideRight, nameRight - nameLeft));
-    p.setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 8));
-    p.setPen(discord::faint());
-    QString state = QStringLiteral("在线");
-    if (m_name.isEmpty()) state = QStringLiteral("离线");
-    else if (m_away) state = QStringLiteral("离开");
-    else if (m_outputMuted) state = QStringLiteral("耳机静音");
-    else if (m_inputMuted) state = QStringLiteral("麦克风静音");
-    p.drawText(QRect(nameLeft, rowCenter + 2, nameRight - nameLeft, 13),
-               Qt::AlignLeft | Qt::AlignVCenter, state);
+    const QFont nameFont = discord::font(foundation::bodySize, QFont::DemiBold);
+    const QFont stateFont = discord::font(foundation::captionSize);
+    const QFontMetrics nameMetrics(nameFont, this);
+    const QFontMetrics stateMetrics(stateFont, this);
+    const int textLeft = qRound(av.right()) + foundation::gapNormal;
+    const int textWidth = qMax(0, qRound(buttonRect(0).left()) - foundation::gapNormal - textLeft);
+    const int textHeight = nameMetrics.height() + foundation::gapTight + stateMetrics.height();
+    const qreal top = rowCenter - textHeight / 2.0;
+    if (textWidth > 0) {
+        const QString displayName = m_name.isEmpty() ? QStringLiteral("未连接") : m_name;
+        p.setFont(nameFont);
+        p.setPen(m_away ? discord::muted() : discord::ink());
+        p.drawText(QRectF(textLeft, top, textWidth, nameMetrics.height()),
+                   Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
+                   nameMetrics.elidedText(displayName, Qt::ElideRight, textWidth));
 
-    // Toggle buttons: away / microphone / speaker on one 24px grid. Idle
-    // glyphs are all the same 1.5px outline; a tinted 24px chip marks the
-    // active state and a neutral chip marks hover.
-    for (int i = 0; i < 3; ++i) {
+        QString state = QStringLiteral("在线");
+        if (m_name.isEmpty()) state = QStringLiteral("离线");
+        else if (m_away) state = QStringLiteral("离开");
+        else if (m_outputMuted) state = QStringLiteral("耳机静音");
+        else if (m_inputMuted) state = QStringLiteral("麦克风静音");
+        p.setFont(stateFont);
+        p.setPen(discord::muted());
+        p.drawText(QRectF(textLeft, top + nameMetrics.height() + foundation::gapTight,
+                          textWidth, stateMetrics.height()),
+                   Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
+                   stateMetrics.elidedText(state, Qt::ElideRight, textWidth));
+    }
+
+    const QColor hoverFill = discord::hover();
+    const QColor pressedFill = discord::color(Color::fillPressed);
+    for (int i = 0; i < kButtonCount; ++i) {
         const QRectF btn = buttonRect(i);
         const bool active = buttonActive(i);
         const QColor tint = i == 0 ? discord::awayColor() : discord::danger();
-        if (active) {
-            QColor bg = tint;
-            bg.setAlpha(36);
+        const auto& visual = m_visuals[i];
+        if (active || visual.hover > 0 || visual.press > 0) {
+            QColor bg = mixUserColor(fill, hoverFill, visual.hover);
+            bg = mixUserColor(bg, pressedFill, visual.press);
+            if (active) {
+                const QColor activeFill = i == 0 ? tint : discord::color(Color::fillDanger);
+                bg = mixUserColor(bg, activeFill, (36 + 24 * visual.press) / 255.0);
+            }
             p.setPen(Qt::NoPen);
             p.setBrush(bg);
-            p.drawRoundedRect(btn, 6, 6);
-        } else if (m_hover == i) {
-            p.setPen(Qt::NoPen);
-            p.setBrush(discord::selected());
-            p.drawRoundedRect(btn, 6, 6);
+            p.drawRoundedRect(btn, foundation::radiusControl, foundation::radiusControl);
         }
-        const QRectF icon(btn.left() + 4, btn.top() + 4, 16, 16);
+        // The glyph alone moves down a pixel on press; the button rect stays fixed.
+        const QRectF icon(btn.center().x() - kUserGlyphSize / 2.0,
+                          btn.center().y() - kUserGlyphSize / 2.0 + visual.press,
+                          kUserGlyphSize, kUserGlyphSize);
         const QColor color = active ? tint : discord::muted();
         if (i == 0)
             drawAwayOutline(p, icon, color);
@@ -835,6 +896,7 @@ void UserPanel::paintEvent(QPaintEvent*) {
 void UserPanel::mousePressEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton) return;
     const int button = buttonAt(e->pos());
+    setPointerState(button, button);
     if (button < 0) return;
     if (!m_funcs.getCurrentServerConnectionHandlerID || !m_funcs.setClientSelfVariableAsInt ||
         !m_funcs.flushClientSelfUpdates || !m_funcs.getClientID) return;
@@ -868,23 +930,35 @@ void UserPanel::mousePressEvent(QMouseEvent* e) {
     if (m_stateChange) m_stateChange(h, self, flag, value);
 }
 
+void UserPanel::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton) setPointerState(buttonAt(e->pos()), -1);
+    QWidget::mouseReleaseEvent(e);
+}
+
 void UserPanel::mouseMoveEvent(QMouseEvent* e) {
-    const int hover = buttonAt(e->pos());
-    if (hover == m_hover) return;
-    m_hover = hover;
-    if (hover >= 0) setCursor(Qt::PointingHandCursor);
-    else unsetCursor();
-    update();
+    // The implicit mouse grab can deliver moves outside the panel before Leave.
+    const QPoint pos = e->pos();
+    const bool keepPress = rect().contains(pos) && e->buttons().testFlag(Qt::LeftButton);
+    setPointerState(buttonAt(pos), keepPress ? m_pressed : -1);
 }
 
 void UserPanel::leaveEvent(QEvent*) {
-    if (m_hover < 0) return;
-    m_hover = -1;
-    unsetCursor();
-    update();
+    setPointerState(-1, -1);
 }
 
 bool UserPanel::event(QEvent* e) {
+    switch (e->type()) {
+    case QEvent::UngrabMouse:
+    case QEvent::WindowDeactivate:
+        setPointerState(-1, -1);
+        break;
+    case QEvent::Hide:
+    case QEvent::EnabledChange:
+        if (e->type() == QEvent::Hide || !isEnabled()) setPointerState(-1, -1, true);
+        break;
+    default:
+        break;
+    }
     if (e->type() == QEvent::ToolTip) {
         auto* help = static_cast<QHelpEvent*>(e);
         const int button = buttonAt(help->pos());
@@ -1157,10 +1231,10 @@ NativeTreeRows::Kind NativeTreeRows::kindOf(const QModelIndex& index) const {
 QSize NativeTreeRows::sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const {
     Q_UNUSED(option);
     const Kind k = kindOf(index);
-    int h = 32;
+    int h = foundation::controlHeight;
     if (k == Server) h = 54;
-    else if (k == Channel) h = 36;
-    else if (k == Category) h = 34;
+    else if (k == Channel) h += foundation::gapTight;
+    else if (k == Category) h += foundation::gapTight / 2;
     return QSize(200, h);
 }
 
@@ -1244,71 +1318,80 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     const QRect r = option.rect;
     const QString raw = index.data(Qt::DisplayRole).toString();
 
+    if (r.isEmpty()) return;
     p->save();
+    p->setClipRect(r, Qt::IntersectClip);
     p->setRenderHint(QPainter::Antialiasing, true);
 
     const bool selected = option.state & QStyle::State_Selected;
     const bool current = (kind == Channel || kind == Category) && !m_myChannel.isEmpty() &&
                          raw == m_myChannel;
+    const QRectF rowSurface = QRectF(r).adjusted(1.5, 1.5, -1.5, -1.5);
     if (selected || current) {
         p->setPen(Qt::NoPen);
-        p->setBrush(discord::selected());
-        p->drawRoundedRect(r.adjusted(5, 1, -5, -1), 4, 4);
+        p->setBrush(selected ? discord::selected() : discord::color(Color::fillAccentSubtle));
+        p->drawRoundedRect(rowSurface, foundation::radiusControl, foundation::radiusControl);
+    }
+    const bool focused = option.state.testFlag(QStyle::State_HasFocus);
+    const bool keyboardFocus = focused && option.state.testFlag(QStyle::State_KeyboardFocusChange);
+    if (focused && !selected && kind != ClientRow) {
+        p->setPen(QPen(discord::color(Color::focus), 1));
+        p->setBrush(Qt::NoBrush);
+        p->drawRoundedRect(rowSurface, foundation::radiusControl, foundation::radiusControl);
+    }
+    if (kind == ClientRow && (selected || keyboardFocus) && r.width() >= foundation::gapLoose) {
+        // The keyboard focus marker extends farther down the same gutter.
+        const int markerHeight = keyboardFocus ? foundation::gapSection : foundation::gapLoose;
+        p->setPen(Qt::NoPen);
+        p->setBrush(discord::accent());
+        p->drawRoundedRect(QRectF(r.left() + 2, r.y() + (r.height() - markerHeight) / 2.0,
+                                  3, markerHeight), 1.5, 1.5);
     }
 
     if (kind == Server) {
-        QFont f(QStringLiteral("Microsoft YaHei UI"), 13);
-        f.setWeight(QFont::DemiBold);
+        const QFont f = discord::font(foundation::subtitleSize, QFont::DemiBold);
         p->setFont(f);
         p->setPen(discord::ink());
-        const QFontMetrics fm(f);
+        const QFontMetrics fm = p->fontMetrics();
         const QString title = m_serverName.isEmpty() ? raw : m_serverName;
-        drawTreeLabel(*p, QRect(r.left() + 12, r.top(), r.width() - 24, r.height() - 4),
-                      fm.elidedText(title, Qt::ElideRight, r.width() - 24));
+        const QRect label = r.adjusted(foundation::gapLoose, 0, -foundation::gapLoose,
+                                       -foundation::gapTight);
+        if (!label.isEmpty())
+            drawTreeLabel(*p, label, fm.elidedText(title, Qt::ElideRight, label.width()));
         p->setPen(QPen(discord::divider(), 1));
         p->drawLine(r.left(), r.bottom(), r.right(), r.bottom());
         p->restore();
         return;
     }
 
-    if (kind == Spacer) {
+    if (kind == Spacer || kind == Category) {
         QString t = raw;
-        const int close = t.indexOf(']');
-        if (close >= 0) t = t.mid(close + 1);
-        t = t.trimmed().toUpper();
-        QFont f(QStringLiteral("Microsoft YaHei UI"), 10);
-        f.setWeight(QFont::DemiBold);
-        p->setFont(f);
-        p->setPen(discord::faint());
-        const QFontMetrics fm(f);
-        drawTreeLabel(*p, QRect(r.left() + 14, r.top(), r.width() - 24, r.height()),
-                      fm.elidedText(t, Qt::ElideRight, r.width() - 24));
+        if (kind == Spacer) {
+            const int close = t.indexOf(']');
+            if (close >= 0) t = t.mid(close + 1);
+            t = t.trimmed();
+        }
+        p->setFont(discord::font(foundation::captionSize, QFont::DemiBold));
+        p->setPen(kind == Spacer ? discord::faint() : discord::muted());
+        const QRect label = r.adjusted(kind == Spacer ? foundation::gapLoose : foundation::gapNormal,
+                                       0, -foundation::gapLoose, 0);
+        if (!label.isEmpty())
+            drawTreeLabel(*p, label, p->fontMetrics().elidedText(t.toUpper(), Qt::ElideRight, label.width()));
         p->restore();
         return;
     }
 
-    if (kind == Category) {
-        QFont f(QStringLiteral("Microsoft YaHei UI"), 10);
-        f.setWeight(QFont::DemiBold);
-        p->setFont(f);
-        p->setPen(discord::muted());
-        const QFontMetrics fm(f);
-        drawTreeLabel(*p, QRect(r.left() + 4, r.top(), r.width() - 20, r.height()),
-                      raw.toUpper());
-        p->restore();
-        return;
-    }
-
-    QFont rowFont(QStringLiteral("Microsoft YaHei UI"), 11);
-    const QFontMetrics fm(rowFont);
+    const QFont rowFont = discord::font(foundation::bodySize);
     p->setFont(rowFont);
+    const QFontMetrics fm = p->fontMetrics();
 
     if (kind == Channel) {
-        drawSpeaker(*p, QRectF(r.left() + 4, r.center().y() - 8, 17, 16), discord::muted(), false);
+        drawSpeaker(*p, QRectF(r.left() + foundation::gapTight, r.center().y() - 8, 17, 16),
+                    discord::muted(), false);
         p->setPen(discord::ink());
-        const int left = r.left() + 26;
-        const int right = r.right() - 26;
-        drawTreeLabel(*p, QRect(left, r.top(), right - left, r.height()), raw);
+        const QRect label = r.adjusted(26, 0, -26, 0);
+        if (!label.isEmpty())
+            drawTreeLabel(*p, label, fm.elidedText(raw, Qt::ElideRight, label.width()));
         if (m_locked.contains(raw))
             drawLock(*p, QRectF(r.right() - 20, r.center().y() - 6, 11, 13), discord::faint());
         p->restore();
@@ -1332,9 +1415,8 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
         p->drawEllipse(dot.adjusted(-1.5, -1.5, 1.5, 1.5));
         p->setBrush(discord::green().lighter(115));
     } else {
-        // Online with an open mic: the theme accent, so it reads as "active"
-        // long before the green speaking light fires.
-        QColor ident = discord::accent();
+        // The member dot keeps its teal identity independently of the UI palette.
+        QColor ident = discord::isDark() ? QColor(0x2D, 0xD4, 0xBF) : QColor(0x0F, 0x76, 0x6E);
         if (away) ident.setAlpha(150);
         p->setPen(Qt::NoPen);
         p->setBrush(ident);
@@ -1355,7 +1437,7 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     QString rest = raw;
     QFont groupFont = rowFont;
     groupFont.setWeight(QFont::Bold);
-    const QFontMetrics gfm(groupFont);
+    const QFontMetrics gfm(groupFont, p->device());
     while (rest.startsWith('[')) {
         const int close = rest.indexOf(']');
         if (close < 0) break;
@@ -1389,20 +1471,18 @@ enum ChatRole {
     ChatTime,
     ChatSelf,
     ChatSystem,
-    ChatSeverity
+    ChatSeverity,
+    ChatPoke
 };
 
-constexpr int kChatPad = 14;        // row side margin
-constexpr int kChatBubblePad = 10;  // bubble inner padding, horizontal
-constexpr int kChatBubblePadY = 8;  // bubble inner padding, vertical
+constexpr int kChatPad = foundation::gapLoose;
+constexpr int kChatBubblePad = foundation::gapNormal;
+constexpr int kChatPadY = foundation::gapNormal;
+constexpr int kChatScrollGutter = 10;  // Matches the Foundation scrollbar extent.
 
-QFont chatNameFont() {
-    QFont f(QStringLiteral("Microsoft YaHei UI"), 9);
-    f.setWeight(QFont::DemiBold);
-    return f;
-}
-
-QFont chatTextFont() { return QFont(QStringLiteral("Microsoft YaHei UI"), 10); }
+QFont chatNameFont() { return discord::font(foundation::bodySize, QFont::DemiBold); }
+QFont chatTextFont() { return discord::font(foundation::bodySize); }
+QFont chatTimeFont() { return discord::font(foundation::captionSize); }
 
 // QTextLayout does not break at '\n', so a message is split into paragraphs
 // first and each paragraph is wrapped on its own.
@@ -1416,18 +1496,17 @@ struct ChatPara {
 
 struct ChatTextGeom {
     QString text;
-    QFont font;
     std::vector<ChatPara> paras;
     qreal maxLineWidth = 0;
     int height = 0;
 };
 
 ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth,
+                           const QPaintDevice* device,
                            QTextOption::WrapMode wrapMode = QTextOption::WordWrap,
                            Qt::Alignment alignment = Qt::AlignLeft) {
     ChatTextGeom g;
     g.text = text;
-    g.font = font;
     if (text.isEmpty()) return g;
 
     int start = 0;
@@ -1440,7 +1519,7 @@ ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth
         para.start = start;
         para.length = len;
         para.top = top;
-        para.layout.reset(new QTextLayout(text.mid(start, len), font));
+        para.layout.reset(new QTextLayout(text.mid(start, len), font, device));
         QTextOption opt;
         opt.setWrapMode(wrapMode);
         opt.setAlignment(alignment);
@@ -1458,7 +1537,7 @@ ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth
         para.layout->endLayout();
         // An empty paragraph still occupies one line so blank lines keep
         // their height.
-        if (para.layout->lineCount() == 0) y = QFontMetricsF(font).height();
+        if (para.layout->lineCount() == 0) y = QFontMetricsF(font, device).height();
         para.height = y;
         top += y;
         g.paras.push_back(std::move(para));
@@ -1501,32 +1580,23 @@ int chatTextPosAt(const ChatTextGeom& g, const QPointF& p) {
     return para.start + local;
 }
 
-QVector<QRectF> chatSelectionRects(const ChatTextGeom& g, int selStart, int selEnd,
-                                   const QPointF& origin) {
-    QVector<QRectF> rects;
-    if (selEnd <= selStart) return rects;
-    for (const ChatPara& para : g.paras) {
-        const int ps = para.start;
-        const int pe = para.start + para.length;
-        if (pe <= selStart || ps >= selEnd) continue;
-        const int a = qMax(selStart, ps);
-        const int b = qMin(selEnd, pe);
-        if (b <= a) continue;
-        for (int i = 0; i < para.layout->lineCount(); ++i) {
-            const QTextLine line = para.layout->lineAt(i);
-            const int ls = ps + line.textStart();
-            const int le = ls + line.textLength();
-            const int la = qMax(a, ls);
-            const int lb = qMin(b, le);
-            if (lb <= la) continue;
-            qreal x0 = line.cursorToX(la - ps);
-            qreal x1 = line.cursorToX(lb - ps);
-            if (x1 < x0) qSwap(x0, x1);
-            rects.append(QRectF(origin.x() + x0, origin.y() + para.top + line.y(),
-                                x1 - x0, line.height()));
-        }
+// Use the layout's own selection painting so wrapped and bidirectional text
+// share the same bounds and keep the Foundation selection foreground.
+void drawChatText(QPainter* p, const ChatTextGeom& g, const QPointF& origin,
+                  const QColor& ink, int selStart, int selEnd, bool onAccent = false) {
+    p->setPen(ink);
+    QTextCharFormat selected;
+    if (selEnd > selStart) {
+        selected.setBackground(discord::color(onAccent ? Color::selectionText : Color::selectionBg));
+        selected.setForeground(discord::color(onAccent ? Color::selectionBg : Color::selectionText));
     }
-    return rects;
+    for (const ChatPara& para : g.paras) {
+        QVector<QTextLayout::FormatRange> ranges;
+        const int start = qMax(selStart, para.start);
+        const int end = qMin(selEnd, para.start + para.length);
+        if (end > start) ranges.append({start - para.start, end - start, selected});
+        para.layout->draw(p, origin + QPointF(0, para.top), ranges);
+    }
 }
 
 // Everything the delegate and the selection code need to agree on: where the
@@ -1534,13 +1604,14 @@ QVector<QRectF> chatSelectionRects(const ChatTextGeom& g, int selStart, int selE
 struct ChatRowGeom {
     bool valid = false;
     bool system = false;
-    int height = 30;
+    int height = foundation::controlHeight;
+    int metadataHeight = 0;
     QRect bubbleRect;
     QRect textRect;
     ChatTextGeom textGeom;
 };
 
-ChatRowGeom buildChatRow(int width, const QModelIndex& index) {
+ChatRowGeom buildChatRow(int width, const QModelIndex& index, const QPaintDevice* device) {
     ChatRowGeom g;
     if (!index.isValid()) return g;
     g.valid = true;
@@ -1548,33 +1619,40 @@ ChatRowGeom buildChatRow(int width, const QModelIndex& index) {
     if (g.system) {
         const QString sender = index.data(ChatSender).toString();
         const QString text = index.data(ChatText).toString();
-        const int innerWidth = qMax(1, width - 2 * kChatPad);
+        // Server logs keep the compact line geometry used for text selection.
+        constexpr int sideInset = 14;
+        constexpr int minimumHeight = 30;
+        constexpr int bottomInset = 8;
+        constexpr int verticalInsets = 12;
+        const int innerWidth = qMax(1, width - 2 * sideInset);
         g.textGeom = buildChatText(sender.isEmpty() ? text : sender + QStringLiteral("  ") + text,
-                                   QFont(QStringLiteral("Microsoft YaHei UI"), 9), innerWidth,
+                                   chatTimeFont(), innerWidth, device,
                                    QTextOption::WrapAtWordBoundaryOrAnywhere, Qt::AlignHCenter);
-        g.height = qMax(30, g.textGeom.height + 12);
-        g.textRect = QRect(kChatPad, g.height - 8 - g.textGeom.height,
+        g.height = qMax(minimumHeight, g.textGeom.height + verticalInsets);
+        g.textRect = QRect(sideInset, g.height - bottomInset - g.textGeom.height,
                            innerWidth, g.textGeom.height);
         return g;
     }
 
     const bool self = index.data(ChatSelf).toBool();
     const QString text = index.data(ChatText).toString();
-    const int maxBubble = qMax(120, int(width * 0.76));
-    const int innerMax = qMax(40, maxBubble - 2 * kChatBubblePad);
-    g.textGeom = buildChatText(text, chatTextFont(), innerMax);
+    const int available = qMax(1, width - 2 * kChatPad);
+    const int maxBubble = qMin(available, qMax(120, int(width * 0.76)));
+    const int pad = qMin(kChatBubblePad, (maxBubble - 1) / 2);
+    const int innerMax = maxBubble - 2 * pad;
+    g.textGeom = buildChatText(text, chatTextFont(), innerMax, device);
 
     const int innerW = qMin(innerMax, qCeil(g.textGeom.maxLineWidth) + 1);
-    const int bubbleW = qMin(maxBubble, innerW + 2 * kChatBubblePad);
-    const int bubbleH = g.textGeom.height + 2 * kChatBubblePadY;
-    const int nameH = QFontMetrics(chatNameFont()).height();
-    const int bubbleY = 6 + nameH + 4;
+    const int bubbleW = innerW + 2 * pad;
+    const int bubbleH = g.textGeom.height + 2 * kChatPadY;
+    g.metadataHeight = qMax(QFontMetrics(chatNameFont(), device).height(),
+                            QFontMetrics(chatTimeFont(), device).height());
+    const int bubbleY = kChatPadY + g.metadataHeight + foundation::gapTight;
     const int bubbleX = self ? (width - kChatPad - bubbleW) : kChatPad;
 
     g.bubbleRect = QRect(bubbleX, bubbleY, bubbleW, bubbleH);
-    g.textRect = QRect(bubbleX + kChatBubblePad, bubbleY + kChatBubblePadY,
-                       bubbleW - 2 * kChatBubblePad, bubbleH - 2 * kChatBubblePadY);
-    g.height = bubbleY + bubbleH + 12;
+    g.textRect = QRect(bubbleX + pad, bubbleY + kChatPadY, innerW, g.textGeom.height);
+    g.height = bubbleY + bubbleH + kChatPadY;
     return g;
 }
 
@@ -1587,118 +1665,101 @@ bool chatWordChar(QChar ch) {
 // keeps the position they scrolled to.
 constexpr int kFollowSlack = 24;
 
+class ChatScrollBar : public QScrollBar {
+public:
+    explicit ChatScrollBar(QWidget* parent) : QScrollBar(Qt::Vertical, parent) {}
+
+protected:
+    void paintEvent(QPaintEvent* event) override {
+        // Keep the gutter in the layout even while there is no thumb to draw.
+        if (minimum() < maximum()) QScrollBar::paintEvent(event);
+    }
+};
+
 class ChatBubbleDelegate : public QStyledItemDelegate {
 public:
     explicit ChatBubbleDelegate(ModernChat* view) : m_view(view) {}
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        int width = option.rect.width();
-        if (width <= 0 && m_view) width = m_view->viewport()->width();
-        const ChatRowGeom row = buildChatRow(width, index);
-        return QSize(qMax(width, 0), row.valid ? row.height : 30);
+        const QWidget* viewport = m_view->viewport();
+        const int width = option.rect.width() > 0 ? option.rect.width() : viewport->width();
+        const ChatRowGeom row = buildChatRow(width, index, viewport);
+        return QSize(width, row.height);
     }
 
     void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        const QRect r = option.rect;
         p->save();
+        p->setClipRect(r, Qt::IntersectClip);
         p->setRenderHint(QPainter::Antialiasing, true);
-        p->fillRect(option.rect, discord::bg());
+        p->fillRect(r, discord::bg());
 
-        const ChatRowGeom row = buildChatRow(option.rect.width(), index);
+        const ChatRowGeom row = buildChatRow(r.width(), index, m_view->viewport());
         if (!row.valid) {
             p->restore();
             return;
         }
 
-        const QString sender = index.data(ChatSender).toString();
-        const QString time = index.data(ChatTime).toString();
-        const bool self = index.data(ChatSelf).toBool();
-
+        int selA = 0;
+        int selB = 0;
+        m_view->selectionRangeForRow(index.row(), selA, selB);
+        const QPoint textOrigin = row.textRect.topLeft() + r.topLeft();
         if (row.system) {
-            int selA = 0;
-            int selB = 0;
-            if (m_view && m_view->selectionRangeForRow(index.row(), selA, selB)) {
-                const QVector<QRectF> rects = chatSelectionRects(
-                    row.textGeom, selA, selB, row.textRect.topLeft() + option.rect.topLeft());
-                QColor highlight = discord::accent();
-                highlight.setAlpha(discord::isDark() ? 90 : 64);
-                p->setPen(Qt::NoPen);
-                p->setBrush(highlight);
-                for (const QRectF& rect : rects) p->drawRect(rect);
-            }
-            p->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
             const int severity = index.data(ChatSeverity).toInt();
-            // Server log errors keep the client's red; warnings amber; our
-            // own informational lines stay grey.
-            p->setPen(severity >= 2 ? discord::severityRed()
-                                    : (severity == 1 ? discord::severityAmber()
-                                                     : discord::faint()));
-            for (const ChatPara& para : row.textGeom.paras) {
-                if (!para.layout) continue;
-                para.layout->draw(p, QPointF(option.rect.left() + row.textRect.left(),
-                                             option.rect.top() + row.textRect.top() + para.top));
+            const bool poke = index.data(ChatPoke).toBool();
+            QColor ink = discord::muted();
+            if (poke) {
+                ink = discord::accent();
+                p->setPen(Qt::NoPen);
+                p->setBrush(ink);
+                const int height = foundation::gapLoose;
+                p->drawRoundedRect(QRectF(r.left() + foundation::gapTight,
+                                          r.y() + (r.height() - height) / 2.0, 3, height), 1.5, 1.5);
+            } else if (severity >= 2) {
+                ink = discord::severityRed();
+            } else if (severity == 1) {
+                ink = discord::severityAmber();
             }
+            drawChatText(p, row.textGeom, textOrigin, ink, selA, selB);
             p->restore();
             return;
         }
 
-        const QColor ink = discord::ink();
-        const QColor faint = discord::faint();
-        const QColor selfBubble = discord::bubbleSelf();
-        const QColor otherBubble = discord::bubbleOther();
-        const QColor accent = discord::accent();
-
-        const QRect r = option.rect;
-        const int left = r.left() + kChatPad;
-        const int right = r.right() - kChatPad;
+        const bool self = index.data(ChatSelf).toBool();
+        const QString sender = self ? QStringLiteral("我") : index.data(ChatSender).toString();
+        const QString time = index.data(ChatTime).toString();
+        const QRect meta = r.adjusted(kChatPad, kChatPadY, -kChatPad, 0);
         const QFont nameFont = chatNameFont();
-        const QFontMetrics afm(nameFont);
-        const int nameH = afm.height();
-        const int top = r.top() + 6;
+        const QFont timeFont = chatTimeFont();
+        const QFontMetrics nameMetrics(nameFont, p->device());
+        const QFontMetrics timeMetrics(timeFont, p->device());
+        const int timeWidth = time.isEmpty() ? 0 : timeMetrics.horizontalAdvance(time) + 2;
+        const int timeSpace = timeWidth && timeWidth + 2 * foundation::gapNormal < meta.width()
+                                  ? timeWidth + foundation::gapNormal : 0;
+        const int nameSpace = qMax(0, meta.width() - timeSpace);
+        const QString display = nameMetrics.elidedText(sender, Qt::ElideRight, nameSpace);
+        const int nameWidth = qMin(nameSpace, nameMetrics.horizontalAdvance(display) + 2);
+        const int nameX = self ? meta.x() + meta.width() - nameWidth : meta.x();
 
         p->setFont(nameFont);
-        p->setPen(self ? accent : ink);
-        const QString display = self ? QStringLiteral("我") : sender;
-        const int nameW = afm.horizontalAdvance(display);
-        const int nameX = self ? (right - nameW) : left;
-        p->drawText(QRect(nameX, top, nameW + 2, nameH), Qt::AlignLeft | Qt::AlignVCenter, display);
+        p->setPen(self ? discord::accent() : discord::ink());
+        p->drawText(QRect(nameX, meta.top(), nameWidth, row.metadataHeight),
+                    (self ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter, display);
 
-        if (!time.isEmpty()) {
-            const QFont timeFont(QStringLiteral("Microsoft YaHei UI"), 7);
+        if (timeSpace > 0) {
+            const int timeX = self ? nameX - timeSpace : nameX + nameWidth + foundation::gapNormal;
             p->setFont(timeFont);
-            p->setPen(faint);
-            const QFontMetrics tfm2(timeFont);
-            const int tw = tfm2.horizontalAdvance(time);
-            if (self) {
-                p->drawText(QRect(nameX - tw - 8, top, tw, nameH),
-                            Qt::AlignRight | Qt::AlignVCenter, time);
-            } else {
-                p->drawText(QRect(nameX + nameW + 8, top, tw + 4, nameH),
-                            Qt::AlignLeft | Qt::AlignVCenter, time);
-            }
+            p->setPen(discord::faint());
+            p->drawText(QRect(timeX, meta.top(), timeWidth, row.metadataHeight),
+                        (self ? Qt::AlignRight : Qt::AlignLeft) | Qt::AlignVCenter, time);
         }
 
         p->setPen(Qt::NoPen);
-        p->setBrush(self ? selfBubble : otherBubble);
-        p->drawRoundedRect(QRectF(row.bubbleRect).translated(r.topLeft()), 10, 10);
-
-        int selA = 0;
-        int selB = 0;
-        if (m_view && m_view->selectionRangeForRow(index.row(), selA, selB)) {
-            const QVector<QRectF> rects =
-                chatSelectionRects(row.textGeom, selA, selB, row.textRect.topLeft() + r.topLeft());
-            QColor highlight = discord::accent();
-            highlight.setAlpha(discord::isDark() ? 90 : 64);
-            p->setBrush(highlight);
-            for (const QRectF& rect : rects) p->drawRect(rect);
-        }
-
-        p->setPen(ink);
-        p->setFont(row.textGeom.font);
-        for (const ChatPara& para : row.textGeom.paras) {
-            if (!para.layout) continue;
-            para.layout->draw(p, QPointF(row.textRect.left() + r.left(),
-                                         row.textRect.top() + para.top + r.top()));
-        }
+        p->setBrush(self ? discord::accent() : discord::bubbleOther());
+        p->drawRoundedRect(row.bubbleRect.translated(r.topLeft()),
+                           foundation::radiusOverlay, foundation::radiusOverlay);
+        const QColor bodyInk = self ? discord::color(Color::textOnAccent) : discord::ink();
+        drawChatText(p, row.textGeom, textOrigin, bodyInk, selA, selB, self);
         p->restore();
     }
 
@@ -1713,85 +1774,109 @@ ModernChat::ModernChat(QWidget* parent) : QListWidget(parent) {
     setSelectionMode(QAbstractItemView::NoSelection);
     setFocusPolicy(Qt::ClickFocus);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* sb = new ChatScrollBar(this);
+    setVerticalScrollBar(sb);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    setResizeMode(QListView::Adjust);  // Wrapped rows are sized against the viewport width.
     setUniformItemSizes(false);
     setSpacing(0);
     viewport()->setCursor(Qt::IBeamCursor);
     applyTheme();
-    // The delegate sizes the rows, so the scrollbar range reaches its final
-    // value only a layout after the rows go in - long after setMessages() ran.
-    // Follow the bottom whenever the range grows while the reader sits there;
-    // scrolling away from the bottom drops the flag, so reading back through
-    // the history is not fought every time a message arrives.
-    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int max) {
-        // Same guard: a collapsed pane reports 0..0, and re-pinning there only
-        // destroys the offset that the next real layout should have kept.
-        if (max <= 0 || !m_followBottom) return;
-        verticalScrollBar()->setValue(max);
+
+    m_wheelMotion.setDuration(foundation::motionDuration);
+    m_wheelMotion.setEasingCurve(foundation::motionEasing());
+    m_wheelMotion.setStartValue(0.0);
+    m_wheelMotion.setEndValue(1.0);
+    connect(&m_wheelMotion, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        if (m_wheelMotion.state() != QAbstractAnimation::Running) return;
+        const int offset = m_wheelStart + qRound((m_wheelTarget - m_wheelStart) * value.toReal());
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        verticalScrollBar()->setValue(offset);
     });
-    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
-        const QScrollBar* sb = verticalScrollBar();
-        if (!sb) return;
-        // A zero range means "nothing to scroll", not "the reader is at the
-        // bottom". The client shrinks the chat page to 0 height for a frame
-        // while it rebuilds the pane, and treating that as bottom re-armed the
-        // follow flag, so the next real layout yanked the view back down.
-        if (sb->maximum() <= 0) return;
-        m_followBottom = value >= sb->maximum() - kFollowSlack;
-        // Remember the reading position so a pane rebuild can restore it.
-        m_savedOffset = m_followBottom ? -1 : value;
+    connect(&m_wheelMotion, &QVariantAnimation::finished, this, [this] {
+        auto* bar = verticalScrollBar();
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        bar->setValue(m_wheelTarget);
+        rememberScrollPosition(bar->value());
     });
+
+    // Layout can finish after the rows go in. Use the reading intent saved
+    // before that layout, and ignore intermediate clamps during our rebuilds.
+    connect(sb, &QScrollBar::rangeChanged, this, [this] { restoreScrollPosition(); });
+    connect(sb, &QScrollBar::valueChanged, this, [this](int value) {
+        if (!m_adjustingScroll && m_wheelMotion.state() != QAbstractAnimation::Running)
+            rememberScrollPosition(value);
+    });
+    // Direct use of the thumb or scrollbar actions takes over at the visible offset.
+    connect(sb, &QScrollBar::actionTriggered, this, [this] { stopWheelScroll(); });
+    connect(sb, &QScrollBar::sliderPressed, this, [this] { stopWheelScroll(); });
 }
 
 void ModernChat::applyTheme() {
     setStyleSheet(QStringLiteral(
         "QListWidget { background:%1; border:none; }"
         "QListWidget::item { border:none; }"
-        "QListWidget::item:selected { background:transparent; }")
-        .arg(discord::bg().name()));
+        "QListWidget::item:selected { background:transparent; }"
+        "QScrollBar:vertical { width:%2px; background:transparent; margin:0; }")
+        .arg(discord::bg().name()).arg(kChatScrollGutter));
     viewport()->update();
 }
 
+void ModernChat::rememberScrollPosition(int value) {
+    const QScrollBar* sb = verticalScrollBar();
+    // A collapsed or non-scrollable pane cannot tell us where the reader was.
+    if (sb->maximum() <= sb->minimum() || viewport()->height() <= 0) return;
+    m_followBottom = value >= sb->maximum() - kFollowSlack;
+    m_savedOffset = m_followBottom ? -1 : value;
+}
+
+void ModernChat::restoreScrollPosition() {
+    if (m_adjustingScroll || m_wheelMotion.state() == QAbstractAnimation::Running) return;
+    auto* sb = verticalScrollBar();
+    if (sb->maximum() <= sb->minimum() || viewport()->height() <= 0) return;
+    QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+    if (m_followBottom) sb->setValue(sb->maximum());
+    else if (m_savedOffset >= 0) sb->setValue(m_savedOffset);
+}
+
 void ModernChat::scrollToLatest() {
+    m_wheelMotion.stop();
     m_followBottom = true;
     m_savedOffset = -1;
-    if (count() == 0) return;
-
-    // Rows are sized by the delegate, so right after a rebuild the scrollbar
-    // range is still 0 and scrollToBottom() has nothing to scroll to - the
-    // list then sits at the top of the history and addMessage()'s "am I at the
-    // bottom" test stays false forever. Lay the rows out first, and let the
-    // rangeChanged handler catch the case where even that is too early.
-    executeDelayedItemsLayout();
-    if (QScrollBar* sb = verticalScrollBar()) sb->setValue(sb->maximum());
+    {
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        executeDelayedItemsLayout();
+    }
+    restoreScrollPosition();
 }
 
 void ModernChat::resizeEvent(QResizeEvent* ev) {
-    QListWidget::resizeEvent(ev);
-    if (m_followBottom) {
-        // A relayout can drop the offset back to the top; re-pin it.
-        scrollToLatest();
-        return;
+    finishWheelScroll();
+    {
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        QListWidget::resizeEvent(ev);
+        if (viewport()->height() > 0) executeDelayedItemsLayout();
     }
-    // The client collapses the page to 0 height for a frame while it rebuilds
-    // the pane, which clamps the offset to 0. Put the reader back where they
-    // were once the real geometry is in place again.
-    if (m_savedOffset < 0 || height() <= 0) return;
-    executeDelayedItemsLayout();
-    QScrollBar* sb = verticalScrollBar();
-    if (!sb || sb->maximum() <= 0) return;
-    const int want = qMin(m_savedOffset, sb->maximum());
-    if (sb->value() != want) sb->setValue(want);
+    restoreScrollPosition();
 }
 
 void ModernChat::showEvent(QShowEvent* ev) {
-    QListWidget::showEvent(ev);
-    if (m_followBottom) scrollToLatest();
+    {
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        QListWidget::showEvent(ev);
+        executeDelayedItemsLayout();
+    }
+    restoreScrollPosition();
 }
 
-void ModernChat::addMessage(const ChatMessage& msg) {
-    auto* sb = verticalScrollBar();
-    const int keepValue = sb ? sb->value() : 0;
+void ModernChat::hideEvent(QHideEvent* ev) {
+    finishWheelScroll();
+    m_selecting = false;
+    QListWidget::hideEvent(ev);
+}
+
+void ModernChat::insertMessage(const ChatMessage& msg) {
     auto* item = new QListWidgetItem(this);
     item->setData(ChatSender, msg.sender);
     item->setData(ChatText, msg.text);
@@ -1799,42 +1884,80 @@ void ModernChat::addMessage(const ChatMessage& msg) {
     item->setData(ChatSelf, msg.self);
     item->setData(ChatSystem, msg.system);
     item->setData(ChatSeverity, msg.severity);
+    item->setData(ChatPoke, msg.poke);
     item->setFlags(Qt::NoItemFlags);
-    if (m_filling) return;
-    // m_followBottom, not a fresh maximum-minus-value test: a collapsed pane
-    // reports a zero range, which would read as "at the bottom" and snatch a
-    // reader who is actually scrolled up.
-    if (m_followBottom) {
-        scrollToLatest();
-        return;
+}
+
+void ModernChat::addMessage(const ChatMessage& msg) {
+    // A wheel headed to the newest messages must keep following when new rows arrive.
+    if (m_followBottom) finishWheelScroll();
+    {
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        insertMessage(msg);
+        executeDelayedItemsLayout();
     }
-    // Scroll-per-pixel offsets are recalculated from the cached row heights;
-    // inserting a row can clamp the offset back to the top while the reader is
-    // further down. Re-assert the position it had before the insert.
-    executeDelayedItemsLayout();
-    if (sb && sb->maximum() > 0) sb->setValue(qMin(keepValue, sb->maximum()));
+    restoreScrollPosition();
 }
 
 void ModernChat::setMessages(const QVector<ChatMessage>& msgs, int keepOffset) {
-    clear();
-    clearTextSelection();
-    m_filling = true;
-    for (const ChatMessage& m : msgs) addMessage(m);
-    m_filling = false;
-    // Switching back to a conversation the reader had scrolled up in must not
-    // yank the view: -1 means "was at the bottom", anything else is the pixel
-    // offset to restore. The rows have to be laid out before the offset means
-    // anything, and the stored offset can be past the end of a shorter list.
-    if (keepOffset < 0) {
-        scrollToLatest();
+    finishWheelScroll();
+    {
+        QScopedValueRollback<bool> adjusting(m_adjustingScroll, true);
+        clear();
+        m_selecting = false;
+        clearTextSelection();
+        for (const ChatMessage& msg : msgs) insertMessage(msg);
+        executeDelayedItemsLayout();
+    }
+    // A saved reading offset remains valid even if this layout temporarily has
+    // no scroll range. A later rangeChanged can still restore it.
+    m_followBottom = keepOffset < 0;
+    m_savedOffset = keepOffset;
+    restoreScrollPosition();
+}
+
+void ModernChat::finishWheelScroll() {
+    if (m_wheelMotion.state() != QAbstractAnimation::Running) return;
+    m_wheelMotion.stop();
+    auto* sb = verticalScrollBar();
+    if (sb->maximum() <= sb->minimum() || viewport()->height() <= 0) return;
+    sb->setValue(m_wheelTarget);
+    rememberScrollPosition(sb->value());
+}
+
+void ModernChat::stopWheelScroll() {
+    if (m_wheelMotion.state() != QAbstractAnimation::Running) return;
+    m_wheelMotion.stop();
+    rememberScrollPosition(verticalScrollBar()->value());
+}
+
+void ModernChat::wheelEvent(QWheelEvent* ev) {
+    auto* sb = verticalScrollBar();
+    if (m_selecting || sb->isSliderDown() || !foundation::isMouseWheelNotch(*ev) ||
+        !foundation::animationsEnabled()) {
+        finishWheelScroll();
+        QListWidget::wheelEvent(ev);
         return;
     }
-    executeDelayedItemsLayout();
-    QScrollBar* sb = verticalScrollBar();
-    if (!sb) return;
-    sb->setValue(qMin(keepOffset, sb->maximum()));
-    m_followBottom = sb->value() >= sb->maximum() - kFollowSlack;
-    m_savedOffset = keepOffset;
+
+    const int current = sb->value();
+    const bool running = m_wheelMotion.state() == QAbstractAnimation::Running;
+    const int base = running ? m_wheelTarget : current;
+    const int target = foundation::wheelTarget(*sb, base, ev->angleDelta().y());
+    if (target == base) {
+        if (running) ev->accept();
+        else QListWidget::wheelEvent(ev);
+        return;
+    }
+
+    m_wheelMotion.stop();
+    // Follow is based on the destination so an append cannot pull the view
+    // back down during the first frames of scrolling up.
+    rememberScrollPosition(target);
+    m_wheelStart = current;
+    m_wheelTarget = target;
+    if (target != current) m_wheelMotion.start();
+    ev->accept();
 }
 
 int ModernChat::scrollOffset() const {
@@ -1901,11 +2024,11 @@ ModernChat::TextPos ModernChat::positionAt(const QPoint& viewportPos) const {
     if (row < 0) return p;
 
     p.row = row;
-    const ChatRowGeom g = buildChatRow(viewport()->width(), model()->index(row, 0));
+    const QRect rowRect = visualItemRect(item(row));
+    const ChatRowGeom g = buildChatRow(rowRect.width(), model()->index(row, 0), viewport());
     if (!g.valid || g.textGeom.text.isEmpty()) return p;
 
-    const QRect rowRect = visualItemRect(item(row));
-    const QPointF local(pt.x() - g.textRect.left(), pt.y() - rowRect.top() - g.textRect.top());
+    const QPointF local(pt - rowRect.topLeft() - g.textRect.topLeft());
     p.pos = chatTextPosAt(g.textGeom, local);
     return p;
 }
@@ -1923,6 +2046,7 @@ void ModernChat::mousePressEvent(QMouseEvent* ev) {
         QListWidget::mousePressEvent(ev);
         return;
     }
+    stopWheelScroll();
     setFocus(Qt::MouseFocusReason);
     m_selecting = true;
     const TextPos p = positionAt(ev->pos());
@@ -2000,10 +2124,12 @@ void ModernChat::keyPressEvent(QKeyEvent* ev) {
         ev->accept();
         return;
     }
+    stopWheelScroll();
     QListWidget::keyPressEvent(ev);
 }
 
 void ModernChat::contextMenuEvent(QContextMenuEvent* ev) {
+    stopWheelScroll();
     const QPoint vp = viewport()->mapFrom(this, ev->pos());
     const QModelIndex idx = indexAt(vp);
     const int row = idx.isValid() ? idx.row() : -1;
@@ -2089,9 +2215,8 @@ void ModernChat::paintEvent(QPaintEvent* ev) {
     if (count() > 0) return;
     QPainter p(viewport());
     p.setRenderHint(QPainter::Antialiasing, true);
-    QFont f(QStringLiteral("Microsoft YaHei UI"), 10);
-    p.setFont(f);
-    p.setPen(discord::faint());
+    p.setFont(chatTextFont());
+    p.setPen(discord::muted());
     p.drawText(viewport()->rect(), Qt::AlignCenter, m_emptyText);
 }
 
@@ -2144,35 +2269,38 @@ void ChatHeader::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
     p.fillRect(rect(), discord::bg());
-    p.setPen(QPen(discord::divider(), 1));
-    p.drawLine(0, height() - 1, width(), height() - 1);
+    p.fillRect(0, height() - 1, width(), 1, discord::divider());
 
-    QFont hash(QStringLiteral("Microsoft YaHei UI"), 14);
-    hash.setWeight(QFont::Bold);
-    p.setFont(hash);
+    const int left = foundation::gapLoose;
+    const int titleLeft = left + foundation::gapSection;
+    const int right = width() - foundation::gapLoose;
+    const int titleSpace = qMax(0, right - titleLeft);
+    constexpr int alignment = Qt::AlignLeft | Qt::AlignVCenter;
+    p.setFont(discord::font(foundation::subtitleSize, QFont::Bold));
     p.setPen(discord::faint());
-    p.drawText(QRect(16, 0, 20, height()), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("#"));
+    p.drawText(QRect(left, 0, foundation::gapSection, height()), alignment, QStringLiteral("#"));
 
-    QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 11);
-    nameFont.setWeight(QFont::DemiBold);
-    p.setFont(nameFont);
+    if (titleSpace == 0) return;
+    p.setFont(discord::font(foundation::bodyLargeSize, QFont::DemiBold));
     p.setPen(discord::ink());
-    const QFontMetrics nfm(nameFont);
+    const QFontMetrics titleMetrics = p.fontMetrics();
     const QString title = m_name.isEmpty() ? QStringLiteral("未连接") : m_name;
-    const int nameWidth = qMin(nfm.horizontalAdvance(title), width() / 2);
-    p.drawText(QRect(36, 0, nameWidth + 4, height()), Qt::AlignLeft | Qt::AlignVCenter, title);
+    const int titleLimit = m_topic.isEmpty() ? titleSpace : qMin(titleSpace, width() / 2);
+    const QString display = titleMetrics.elidedText(title, Qt::ElideRight, titleLimit);
+    const int titleWidth = qMin(titleLimit, titleMetrics.horizontalAdvance(display) + 2);
+    p.drawText(QRect(titleLeft, 0, titleWidth, height()), alignment, display);
 
-    if (!m_topic.isEmpty()) {
-        const int sepX = 36 + nameWidth + 12;
+    const int separator = titleLeft + titleWidth + foundation::gapNormal;
+    const int topicLeft = separator + foundation::gapNormal;
+    const int topicWidth = right - topicLeft;
+    if (!m_topic.isEmpty() && topicWidth >= foundation::gapLoose) {
         p.setPen(QPen(discord::divider(), 1));
-        p.drawLine(sepX, height() / 2 - 8, sepX, height() / 2 + 8);
-
-        QFont topicFont(QStringLiteral("Microsoft YaHei UI"), 8);
-        p.setFont(topicFont);
+        p.drawLine(separator, height() / 2 - foundation::gapNormal,
+                   separator, height() / 2 + foundation::gapNormal);
+        p.setFont(discord::font(foundation::bodySize));
         p.setPen(discord::muted());
-        const QFontMetrics tfm(topicFont);
-        p.drawText(QRect(sepX + 12, 0, width() - sepX - 24, height()), Qt::AlignLeft | Qt::AlignVCenter,
-                   tfm.elidedText(m_topic, Qt::ElideRight, width() - sepX - 24));
+        p.drawText(QRect(topicLeft, 0, topicWidth, height()), alignment,
+                   p.fontMetrics().elidedText(m_topic, Qt::ElideRight, topicWidth));
     }
 }
 
@@ -2181,9 +2309,8 @@ void ChatHeader::paintEvent(QPaintEvent*) {
 namespace {
 constexpr int kToastWidth = 340;
 constexpr int kToastHeight = 72;
-constexpr int kToastMargin = 18;
-// Clear of the menu bar, which stays visible in this layout.
-constexpr int kToastTop = 52;
+constexpr int kToastMargin = foundation::gapLoose;
+constexpr int kToastIndicatorWidth = 3;
 }  // namespace
 
 NotifyToast::NotifyToast(QWidget* parent) : QWidget(parent) {
@@ -2200,7 +2327,7 @@ NotifyToast::NotifyToast(QWidget* parent) : QWidget(parent) {
 void NotifyToast::reposition() {
     QWidget* host = parentWidget();
     if (!host) return;
-    move(qMax(kToastMargin, host->width() - width() - kToastMargin), kToastTop);
+    move(qMax(kToastMargin, host->width() - width() - kToastMargin), kToastMargin);
 }
 
 void NotifyToast::showNotice(const QString& title, const QString& body) {
@@ -2228,29 +2355,25 @@ void NotifyToast::paintEvent(QPaintEvent*) {
     const QRectF card = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
     p.setPen(QPen(discord::cardEdge(), 1));
     p.setBrush(discord::card());
-    p.drawRoundedRect(card, 10, 10);
+    p.drawRoundedRect(card, foundation::radiusOverlay, foundation::radiusOverlay);
 
-    // Accent strip down the left edge, clipped to the rounded card.
-    p.save();
-    QPainterPath clip;
-    clip.addRoundedRect(card, 10, 10);
-    p.setClipPath(clip);
-    p.fillRect(QRectF(card.left(), card.top(), 3, card.height()), discord::accent());
-    p.restore();
+    const int accentHeight = height() - 2 * foundation::cardPadding;
+    p.setPen(Qt::NoPen);
+    p.setBrush(discord::accent());
+    p.drawRoundedRect(QRectF(card.left() + foundation::gapTight, foundation::cardPadding,
+                             kToastIndicatorWidth, accentHeight), 1.5, 1.5);
 
-    const int left = 18;
-    const int textWidth = width() - left - 14;
+    const int left = foundation::cardPadding;
+    const int textWidth = width() - left - foundation::cardPadding;
 
     QString title = m_title.isEmpty() ? QStringLiteral("新消息") : m_title;
     if (m_count > 1) title += QStringLiteral(" ×%1").arg(m_count);
-    QFont titleFont(QStringLiteral("Microsoft YaHei UI"), 10);
-    titleFont.setWeight(QFont::DemiBold);
-    QFont bodyFont(QStringLiteral("Microsoft YaHei UI"), 9);
-    const QFontMetrics titleMetrics(titleFont);
-    const QFontMetrics bodyMetrics(bodyFont);
-    // Centre by the fonts' real heights so a scaled display never clips a line.
-    const int gap = 4;
-    const int top = qMax(10, (height() - (titleMetrics.height() + gap + bodyMetrics.height())) / 2);
+    const QFont titleFont = discord::font(foundation::bodySize, QFont::DemiBold);
+    const QFont bodyFont = discord::font(foundation::bodySize);
+    const QFontMetrics titleMetrics(titleFont, this);
+    const QFontMetrics bodyMetrics(bodyFont, this);
+    const int gap = foundation::gapTight;
+    const int top = (height() - titleMetrics.height() - gap - bodyMetrics.height()) / 2;
     const QString body = m_body.isEmpty() ? QStringLiteral("没有留言") : m_body;
 
     p.setFont(titleFont);

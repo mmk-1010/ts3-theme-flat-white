@@ -1,13 +1,13 @@
 <!--
-TeamSpeak 3 Channel Tooltip Template (EN) 
+TeamSpeak 3 Channel Tooltip Template (EN)
 Copyright (c) TeamSpeak Systems GmbH
- 
-The replaceable variables are embedded in "%%" like %%CHANNEL_NAME%%. At this time you can also use 
-%%?CHANNEL_NAME%% (note the questionmark), which is a tiny "if"- query. Use it, to remove the whole 
+
+The replaceable variables are embedded in "%%" like %%CHANNEL_NAME%%. At this time you can also use
+%%?CHANNEL_NAME%% (note the questionmark), which is a tiny "if"- query. Use it, to remove the whole
 line, if a variable is empty or just "0".
 
-Templates can be placed in "styles/" for default theme or in a sub folder named like an available 
-theme (e.g. "styles/bluesky/"). Be aware that this template will not automaticly be translated when 
+Templates can be placed in "styles/" for default theme or in a sub folder named like an available
+theme (e.g. "styles/bluesky/"). Be aware that this template will not automaticly be translated when
 displayed.
 
 Predefined values have to be inside the html comment-tag to make sure that they will be parsed
@@ -52,10 +52,10 @@ td.label {
 	font-weight: bold;
 }
 .blue {
-	color: #0F766E;
+	color: #0B7068;
 }
 .red {
-	color: #D1453B;
+	color: #B4232C;
 }
 </style>
 
@@ -72,4 +72,4 @@ td.label {
   %%?PLUGIN_INFO_DATA%%
 </table>
 
-<p style="margin-top: 4px; color:#D1453B;">%%?TEMP_CHANNEL_TIME_TO_DELETE%%</p>
+<p style="margin-top: 4px; color:#B4232C;">%%?TEMP_CHANNEL_TIME_TO_DELETE%%</p>

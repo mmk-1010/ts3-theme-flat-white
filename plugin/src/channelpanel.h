@@ -1,4 +1,4 @@
-// Discord-style light UI for the TS3 client, drawn with our own widgets.
+// Custom Fluent Foundation widgets for the TS3 client.
 //
 // ChannelSidebar : server header, categories, voice channels and their clients.
 // UserPanel      : self avatar, name and mute indicators, pinned at the bottom.
@@ -9,52 +9,57 @@
 
 #include <QByteArray>
 #include <QColor>
+#include <QFont>
 #include <QHash>
 #include <QPoint>
 #include <QRectF>
 #include <QSet>
 #include <QString>
+#include <QVariantAnimation>
 #include <QVector>
+#include <array>
 #include <functional>
 #include <QStyledItemDelegate>
 #include <QListWidget>
 #include <QWidget>
 
+#include "foundation_tokens.h"
 #include "ts3_functions.h"
 #include "teamspeak/public_rare_definitions.h"
 
-// Palette for the plugin's own widgets. The dark values mirror the Flat Dark
-// stylesheet; the client keeps one theme active per process, so a single
-// process-wide flag is enough.
+// Compatibility helpers for the plugin's hand-painted widgets. The client
+// keeps one active stylesheet, so dark mode is shared by all plugin surfaces.
 namespace discord {
 void setDark(bool dark);
 bool isDark();
 
-inline QColor bg() { return isDark() ? QColor(0x1B, 0x1D, 0x22) : QColor(0xFF, 0xFF, 0xFF); }
-inline QColor sidebar() { return isDark() ? QColor(0x0F, 0x10, 0x13) : QColor(0xF2, 0xF3, 0xF5); }
-inline QColor panel() { return isDark() ? QColor(0x1B, 0x1D, 0x22) : QColor(0xEB, 0xED, 0xEF); }
-inline QColor ink() { return isDark() ? QColor(0xE7, 0xE9, 0xEC) : QColor(0x31, 0x33, 0x38); }
-inline QColor muted() { return isDark() ? QColor(0xA4, 0xAA, 0xB2) : QColor(0x5C, 0x5E, 0x66); }
-inline QColor faint() { return isDark() ? QColor(0x7C, 0x84, 0x8D) : QColor(0x94, 0x9B, 0xA3); }
-inline QColor selected() { return isDark() ? QColor(0x2C, 0x30, 0x37) : QColor(0xDB, 0xDE, 0xE1); }
-inline QColor hover() { return isDark() ? QColor(0x24, 0x27, 0x2D) : QColor(0xE3, 0xE5, 0xE8); }
-inline QColor blurple() { return QColor(0x58, 0x65, 0xF2); }
-inline QColor green() { return isDark() ? QColor(0x2E, 0xCC, 0x71) : QColor(0x23, 0xA5, 0x5A); }
-inline QColor divider() { return isDark() ? QColor(0x2A, 0x2D, 0x33) : QColor(0xE3, 0xE5, 0xE8); }
-inline QColor accent() { return isDark() ? QColor(0x2D, 0xD4, 0xBF) : QColor(0x0F, 0x76, 0x6E); }
-inline QColor danger() { return isDark() ? QColor(0xE0, 0x6C, 0x64) : QColor(0xC2, 0x5A, 0x52); }
-inline QColor awayColor() { return isDark() ? QColor(0xE3, 0xB3, 0x41) : QColor(0xD9, 0x9A, 0x3D); }
-inline QColor input() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
-// Floating cards (user strip, notification toast) sit on the channel tree,
-// whose light fill is exactly input(); a card using it would have no surface
-// contrast there, so cards get the white page surface and their own edge.
-inline QColor card() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xFF, 0xFF, 0xFF); }
-inline QColor cardEdge() { return isDark() ? QColor(0x2A, 0x2D, 0x33) : QColor(0xDC, 0xE0, 0xE5); }
-inline QColor inputFocus() { return isDark() ? QColor(0x2B, 0x2F, 0x36) : QColor(0xEB, 0xED, 0xEF); }
-inline QColor bubbleSelf() { return isDark() ? QColor(0x10, 0x32, 0x2D) : QColor(0xE3, 0xF1, 0xEE); }
-inline QColor bubbleOther() { return isDark() ? QColor(0x23, 0x26, 0x2C) : QColor(0xF2, 0xF3, 0xF5); }
-inline QColor severityRed() { return isDark() ? QColor(0xE8, 0x80, 0x78) : QColor(0xC2, 0x3B, 0x2E); }
-inline QColor severityAmber() { return isDark() ? QColor(0xE0, 0xA8, 0x4A) : QColor(0xB0, 0x74, 0x1E); }
+inline QColor color(foundation::Color role) { return foundation::color(role, isDark()); }
+inline QFont font(int pixelSize, QFont::Weight weight = QFont::Normal) {
+    QFont f(QString::fromLatin1(foundation::fontFamily));
+    f.setPixelSize(pixelSize);
+    f.setWeight(weight);
+    f.setStyleStrategy(QFont::NoSubpixelAntialias);
+    f.setHintingPreference(QFont::PreferVerticalHinting);
+    return f;
+}
+
+inline QColor bg() { return color(foundation::Color::bgSurface); }
+inline QColor sidebar() { return color(foundation::Color::bgSidebar); }
+inline QColor ink() { return color(foundation::Color::textPrimary); }
+inline QColor muted() { return color(foundation::Color::textSecondary); }
+inline QColor faint() { return color(foundation::Color::textTertiary); }
+inline QColor selected() { return color(foundation::Color::fillSelected); }
+inline QColor hover() { return color(foundation::Color::fillHover); }
+inline QColor green() { return color(foundation::Color::statusSuccess); }
+inline QColor divider() { return color(foundation::Color::strokeDivider); }
+inline QColor accent() { return color(foundation::Color::accent); }
+inline QColor danger() { return color(foundation::Color::statusDanger); }
+inline QColor awayColor() { return color(foundation::Color::statusWarning); }
+inline QColor card() { return color(foundation::Color::bgOverlay); }
+inline QColor cardEdge() { return color(foundation::Color::strokeOverlay); }
+inline QColor bubbleOther() { return color(foundation::Color::bgBubbleOther); }
+inline QColor severityRed() { return color(foundation::Color::textDanger); }
+inline QColor severityAmber() { return color(foundation::Color::textWarning); }
 }  // namespace discord
 
 // ---------------------------------------------------------------------------
@@ -171,21 +176,32 @@ public:
     }
     void setPluginId(const QByteArray& id) { m_pluginId = id; }
 
-    QSize sizeHint() const override { return QSize(280, 64); }
+    QSize sizeHint() const override {
+        return QSize(280, foundation::controlHeight + 2 * foundation::gapLoose);
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
+    void mouseReleaseEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void leaveEvent(QEvent*) override;
     bool event(QEvent*) override;
 
 private:
-    // All three toggles sit on one 24px grid; painting and hit testing both go
-    // through buttonRect so they cannot drift apart.
+    static constexpr int kButtonCount = 3;
+    struct ButtonVisual {
+        qreal hover = 0;
+        qreal press = 0;
+    };
+    using ButtonVisuals = std::array<ButtonVisual, kButtonCount>;
+
+    // Paint and pointer hit testing share buttonRect.
     QRectF buttonRect(int index) const;
     int buttonAt(const QPoint& pos) const;
     bool buttonActive(int index) const;
+    void setPointerState(int hover, int pressed, bool snap = false);
+    void updatePointerVisuals(qreal progress);
 
     TS3Functions m_funcs{};
     QString m_name;
@@ -198,13 +214,17 @@ private:
     std::function<void(quint64, int, unsigned int)> m_error;
     QByteArray m_pluginId;
     int m_hover = -1;
+    int m_pressed = -1;
+    ButtonVisuals m_visuals{};
+    ButtonVisuals m_visualStart{};
+    QVariantAnimation m_pointerMotion;
 };
 
 // ---------------------------------------------------------------------------
 
 // Paints the *stock* ServerTreeView (so the client keeps its own model, ordering,
-// event handling and zero-latency updates) in the Discord-light look: circles
-// instead of avatars for clients, speaking light, and state badges.
+// event handling and zero-latency updates) with custom client dots, speaking
+// lights, and state badges.
 class NativeTreeRows : public QStyledItemDelegate {
 public:
     explicit NativeTreeRows(QObject* parent = nullptr);
@@ -263,8 +283,9 @@ struct ChatMessage {
     QString time;
     bool self = false;
     bool system = false;
-    // 0 = info (grey), 1 = warning (amber), 2 = error / poke (red).
+    // 0 = info, 1 = warning, 2 = error.
     int severity = 0;
+    bool poke = false;
 };
 
 // Modern, plugin-drawn chat log for the channel chat tab. Uses a custom
@@ -277,6 +298,8 @@ public:
     // otherwise the view is restored to that pixel offset.
     void setMessages(const QVector<ChatMessage>& msgs, int keepOffset = -1);
     void scrollToLatest();
+    // Commit pending wheel travel before hiding or saving the current conversation.
+    void finishWheelScroll();
     int scrollOffset() const;
     bool isFollowingBottom() const { return m_followBottom; }
     void setEmptyText(const QString& text) { m_emptyText = text; }
@@ -293,6 +316,8 @@ protected:
     void paintEvent(QPaintEvent* ev) override;
     void resizeEvent(QResizeEvent* ev) override;
     void showEvent(QShowEvent* ev) override;
+    void hideEvent(QHideEvent* ev) override;
+    void wheelEvent(QWheelEvent* ev) override;
     void mousePressEvent(QMouseEvent* ev) override;
     void mouseMoveEvent(QMouseEvent* ev) override;
     void mouseReleaseEvent(QMouseEvent* ev) override;
@@ -312,6 +337,10 @@ private:
     void copySelection();
     void copyRow(int row);
     void copyAll();
+    void insertMessage(const ChatMessage& msg);
+    void restoreScrollPosition();
+    void rememberScrollPosition(int value);
+    void stopWheelScroll();
 
     int m_selAnchorRow = -1;
     int m_selAnchorPos = 0;
@@ -324,9 +353,12 @@ private:
     // Reading position to restore after the client collapses and rebuilds the
     // chat page; -1 while following the bottom.
     int m_savedOffset = -1;
-    // Set while setMessages() fills the list, so the per-row scroll fixups in
-    // addMessage() do not run once per row.
-    bool m_filling = false;
+    // Keep transient scrollbar signals from replacing the saved position during
+    // layout or while writing an intermediate wheel animation frame.
+    bool m_adjustingScroll = false;
+    QVariantAnimation m_wheelMotion;
+    int m_wheelStart = 0;
+    int m_wheelTarget = 0;
     QString m_emptyText = QStringLiteral("这里还没有消息，来打个招呼吧");
 };
 
@@ -340,7 +372,9 @@ public:
     void setChatContext(const QString& title, const QString& subtitle);
     void refresh();
 
-    QSize sizeHint() const override { return QSize(400, 46); }
+    QSize sizeHint() const override {
+        return QSize(400, foundation::controlHeight + 2 * foundation::gapNormal);
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -355,11 +389,8 @@ private:
 
 // ---------------------------------------------------------------------------
 
-// Card shown inside the client window for pokes and incoming messages. Lives
-// as a direct child of MainWindow, so it floats above the chat pane on every
-// tab without joining any layout and without taking keyboard focus. A repeated
-// title updates the card in place and counts up. It stays until clicked; that
-// click is what opens the conversation.
+// Card shown above the client content for pokes and incoming messages.
+// A repeated title updates the same card. Clicking opens the conversation.
 class NotifyToast : public QWidget {
 public:
     explicit NotifyToast(QWidget* parent = nullptr);

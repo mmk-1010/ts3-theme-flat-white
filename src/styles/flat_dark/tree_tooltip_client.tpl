@@ -2,12 +2,12 @@
 TeamSpeak 3 Client Tooltip Template
 Copyright (c) TeamSpeak Systems GmbH
 
-The replaceable variables are embedded in "%%" like %%CLIENT_NAME%%. At this time you can 
-also use %%?CLIENT_NAME%% (note the questionmark), which is a tiny "if"- query. Use it, to 
+The replaceable variables are embedded in "%%" like %%CLIENT_NAME%%. At this time you can
+also use %%?CLIENT_NAME%% (note the questionmark), which is a tiny "if"- query. Use it, to
 remove the whole line, if a variable is empty or just "0".
 
-Templates can be placed in "styles/" for default theme or in a sub folder named like an available 
-theme (e.g. "styles/bluesky/"). Be aware that this template will not automaticly be translated when 
+Templates can be placed in "styles/" for default theme or in a sub folder named like an available
+theme (e.g. "styles/bluesky/"). Be aware that this template will not automaticly be translated when
 displayed.
 
 Predefined values have to be inside the html comment-tag to make sure that they will be parsed
@@ -15,7 +15,7 @@ before the replacing begins! Remove the "#" to enable.
 -->
 
 <style type="text/css">
-table { 
+table {
     border-collapse: collapse;
     border-spacing: 0px;
 }
@@ -28,7 +28,7 @@ td.noborder {
 }
 td.label {
     font-weight: bold;
-    color: #7C848D;
+    color: #CACACA;
 }
 td.avatar {
 	padding: 0px 8px 0px 0px;
@@ -37,7 +37,7 @@ td.avatar {
     color: #2DD4BF;
 }
 .red {
-    color: #F07167;
+    color: #FF8589;
 }
 </style>
 

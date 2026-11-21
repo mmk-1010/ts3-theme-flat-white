@@ -15,8 +15,9 @@
 #include <QFont>
 #include <QHeaderView>
 #include <QIcon>
+#include <QInputMethodEvent>
 #include <QMouseEvent>
-#include <QMetaObject>
+#include <QMetaMethod>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
@@ -27,8 +28,12 @@
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QRegion>
+#include <QScopedValueRollback>
 #include <QTime>
 #include <QLabel>
+#include <QMainWindow>
+#include <QPainterPath>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QStyledItemDelegate>
@@ -46,14 +51,20 @@
 #include <QGridLayout>
 #include <QSizePolicy>
 #include <QWidget>
+#include <QTextBlock>
 #include <QTextEdit>
+#include <QTextLayout>
+#include <QVariantAnimation>
 
 #include <windows.h>
+#include <dwmapi.h>
 
 #include "teamspeak/public_definitions.h"
 #include "teamspeak/public_errors.h"
 #include "channelpanel.h"
+#include "foundation_motion.h"
 
+#include <array>
 #include <chrono>
 #include <functional>
 #include <thread>
@@ -61,6 +72,8 @@
 void cleanupUi();
 
 namespace {
+
+using foundation::Color;
 
 TS3Functions g_funcs{};
 QByteArray g_pluginId;
@@ -77,9 +90,16 @@ QPointer<QTimer> g_timer;
 QPointer<QTimer> g_stateTimer;
 QPointer<QWidget> g_banner;
 QPointer<QWidget> g_bannerHome;
+int g_bannerIndex = -1;
+int g_bannerStretch = 0;
+int g_bannerMaximumHeight = QWIDGETSIZE_MAX;
+bool g_bannerWasVisible = false;
 QPointer<QTreeView> g_paneTree;
 QPointer<QWidget> g_infoFrame;
 QPointer<QWidget> g_infoPage;
+QPointer<QWidget> g_cardHost;
+QPointer<QWidget> g_contentHost;
+QPointer<QWidget> g_nativeContent;
 QPointer<QStackedWidget> g_chatStack;
 QPointer<QWidget> g_infoBar;
 QPointer<QPushButton> g_infoBack;
@@ -87,13 +107,15 @@ QPointer<QLabel> g_infoTitle;
 QPointer<QLabel> g_infoStatus;
 QPointer<QWidget> g_infoHome;
 QPointer<QSplitter> g_infoSplitter;
+int g_infoIndex = -1;
+int g_infoStretch = 0;
+Qt::Alignment g_infoAlignment;
 QPointer<QTreeView> g_infoTree;
 QMetaObject::Connection g_infoConn;
 QPointer<ModernChat> g_modernChat;
 QPointer<NotifyToast> g_notifyToast;
 QPointer<QTabWidget> g_chatTab;
 QPointer<QObject> g_chatFilter;
-QPointer<QWidget> g_chatLog;
 QHash<QString, QVector<ChatMessage>> g_chatHistory;
 QHash<uint64, int> g_connectionStatus;
 // Saved channel and private chat offsets; -1 means the reader was at the bottom.
@@ -143,11 +165,19 @@ public:
     explicit OverlayFilter(QObject* parent = nullptr) : QObject(parent) {}
     std::function<void()> onLayout;
     bool eventFilter(QObject* obj, QEvent* ev) override {
-        if (ev->type() == QEvent::Resize || ev->type() == QEvent::Show) {
-            if (onLayout) onLayout();
+        if (!m_pending && (ev->type() == QEvent::Resize || ev->type() == QEvent::Move ||
+                           ev->type() == QEvent::Show || ev->type() == QEvent::LayoutRequest)) {
+            m_pending = true;
+            QTimer::singleShot(0, this, [this] {
+                m_pending = false;
+                if (onLayout) onLayout();
+            });
         }
         return QObject::eventFilter(obj, ev);
     }
+
+private:
+    bool m_pending = false;
 };
 
 QFile* g_log = nullptr;
@@ -271,6 +301,18 @@ void dumpWidgets() {
 
 // ---------------------------------------------------------------- layout
 
+struct SplitterSizing {
+    QList<int> requestedSizes;
+    QList<bool> visibleChildren;
+};
+
+constexpr int kComposerHeight = 42;
+constexpr int kComposerInset = 12;
+constexpr int kComposerBottomGap = foundation::gapTight;
+constexpr int kSendWidth = 64;
+constexpr int kSendHeight = 30;
+constexpr int kSendInset = 6;
+
 struct SavedLayout {
     QPointer<QSplitter> outer;
     QPointer<QSplitter> inner;
@@ -278,6 +320,14 @@ struct SavedLayout {
     Qt::Orientation innerOrientation = Qt::Horizontal;
     QList<int> outerSizes;
     QList<int> innerSizes;
+    SplitterSizing outerSizing;
+    SplitterSizing innerSizing;
+    QPointer<QLayout> chatLayout;
+    QMargins chatMargins;
+    int chatSpacing = -1;
+    QPointer<QTextEdit> composer;
+    int composerMinimumHeight = 0;
+    int composerMaximumHeight = QWIDGETSIZE_MAX;
 };
 
 SavedLayout g_saved;
@@ -319,6 +369,68 @@ QSplitter* splitterOfTree(QTreeView* tree) {
 }
 
 void restoreLayout();
+
+class RoundedSurface : public QWidget {
+public:
+    explicit RoundedSurface(QWidget* parent) : QWidget(parent) {}
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        if (rect().isEmpty()) return;
+        QPainterPath outline;
+        outline.addRoundedRect(QRectF(rect()), foundation::radiusOverlay, foundation::radiusOverlay);
+        setMask(QRegion(outline.toFillPolygon().toPolygon()));
+    }
+};
+
+void installContentHost(QWidget* content) {
+    if (g_contentHost || !content) return;
+    auto* window = qobject_cast<QMainWindow*>(content->parentWidget());
+    if (!window || window->centralWidget() != content) return;
+
+    const bool visible = !content->isHidden();
+    auto* host = new QWidget(window);
+    host->setObjectName(QStringLiteral("FlatClientContent"));
+    host->setStyleSheet(QStringLiteral(
+        "#FlatClientContent QPushButton, #FlatClientContent QLineEdit,"
+        " #FlatClientContent QToolButton, #FlatClientContent QComboBox,"
+        " #FlatClientContent QSpinBox, #FlatClientContent QDoubleSpinBox { border-radius:%1px; }"
+        " #FlatClientContent QTabBar::tab { border-radius:%1px; }"
+        " #FlatClientContent QTextEdit#ChatLineEdit { border-radius:%2px; }")
+        .arg(foundation::radiusControl).arg(foundation::radiusOverlay));
+    auto* layout = new QVBoxLayout(host);
+    constexpr int inset = foundation::gapTight;
+    layout->setContentsMargins(inset, inset, inset, inset);
+    layout->setSpacing(0);
+    auto* surface = new RoundedSurface(host);
+    auto* contentLayout = new QVBoxLayout(surface);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(surface);
+    g_contentHost = host;
+    g_nativeContent = window->takeCentralWidget();
+    contentLayout->addWidget(content);
+    window->setCentralWidget(host);
+    content->setVisible(visible);
+}
+
+void restoreContentHost() {
+    if (!g_contentHost) return;
+    QWidget* host = g_contentHost;
+    auto* window = qobject_cast<QMainWindow*>(host->parentWidget());
+    if (window && window->centralWidget() == host && g_nativeContent) {
+        const bool visible = !g_nativeContent->isHidden();
+        if (auto* parent = g_nativeContent->parentWidget()) {
+            if (auto* layout = parent->layout()) layout->removeWidget(g_nativeContent);
+        }
+        window->takeCentralWidget();
+        window->setCentralWidget(g_nativeContent);
+        g_nativeContent->setVisible(visible);
+        delete host;
+    }
+    g_contentHost = nullptr;
+    g_nativeContent = nullptr;
+}
 
 // Content-first arrangement:
 //
@@ -388,6 +500,256 @@ void unlockSplitter(QSplitter* splitter) {
     }
 }
 
+// Keep the native widgets and their connections. Reserve room below the
+// chat stack for the search row and composer.
+class ChatComposer : public QObject {
+public:
+    ChatComposer(QTextEdit* editor, QTabWidget* tabs, QObject* parent)
+        : QObject(parent), m_editor(editor), m_tabs(tabs), m_tabStyle(tabs->styleSheet()),
+          m_editorStyle(editor->styleSheet()), m_tabPosition(tabs->tabPosition()) {}
+
+    bool install() {
+        QWidget* pane = m_editor->parentWidget();
+        if (!pane || m_tabs->parentWidget() != pane || !takeSlot(pane->layout(), m_editorSlot, m_editor))
+            return false;
+        m_installed = true;
+        m_search = pane->findChild<QWidget*>(QStringLiteral("SearchFrame"), Qt::FindDirectChildrenOnly);
+        if (m_search && !takeSlot(pane->layout(), m_searchSlot, m_search)) m_search = nullptr;
+        m_tabs->setTabPosition(QTabWidget::North);
+        auto* button = new QPushButton(QStringLiteral("发送"), m_editor);
+        m_send = button;
+        button->setObjectName(QStringLiteral("FlatChatSend"));
+        button->setFixedSize(kSendWidth, kSendHeight);
+        button->setAutoDefault(false);
+        button->setFocusPolicy(Qt::TabFocus);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setVisible(m_editor->metaObject()->indexOfSignal("returnPressed()") >= 0);
+        if (auto* emoticon = pane->findChild<QWidget*>(QStringLiteral("EmoticonButton"))) {
+            m_emoticon = emoticon;
+            m_emoticonHidden = emoticon->isHidden();
+            emoticon->hide();
+        }
+        setEditorPadding(10);
+        for (QObject* widget : {static_cast<QObject*>(pane), static_cast<QObject*>(m_tabs.data()),
+                                static_cast<QObject*>(m_tabs->tabBar()), static_cast<QObject*>(m_editor.data()),
+                                static_cast<QObject*>(m_search.data())}) {
+            if (widget) widget->installEventFilter(this);
+        }
+        connect(m_editor, &QTextEdit::textChanged, this, [this] {
+            refreshButton();
+            schedule();
+        });
+        connect(button, &QPushButton::clicked, this, [this] {
+            if (!canSend()) return;
+            m_editor->setFocus();
+            QMetaObject::invokeMethod(m_editor, "returnPressed", Qt::DirectConnection);
+            refreshButton();
+        });
+        refreshTheme();
+        arrange();
+        return true;
+    }
+
+    ~ChatComposer() override {
+        if (!m_installed) return;
+        m_arranging = true;
+        if (m_editor) disconnect(m_editor, nullptr, this, nullptr);
+        delete m_send.data();
+        if (m_editor) m_editor->setStyleSheet(m_editorStyle);
+        if (m_tabs) {
+            m_tabs->setStyleSheet(m_tabStyle);
+            m_tabs->setTabPosition(m_tabPosition);
+        }
+        restoreSlot(m_editorSlot, m_editor);
+        restoreSlot(m_searchSlot, m_search);
+        if (m_emoticon) m_emoticon->setVisible(!m_emoticonHidden);
+    }
+
+    void refreshTheme() {
+        if (!m_send) return;
+        m_send->setStyleSheet(QStringLiteral(
+            "QPushButton#FlatChatSend { background:%1; color:%2; border:1px solid transparent;"
+            " border-radius:6px; padding:0; min-height:0; font-weight:600; font-size:13px; }"
+            "QPushButton#FlatChatSend:hover { background:%3; }"
+            "QPushButton#FlatChatSend:pressed { background:%4; }"
+            "QPushButton#FlatChatSend:focus { border-color:%2; }"
+            "QPushButton#FlatChatSend:disabled { background:%5; color:%6; }"
+        ).arg(discord::accent().name(), discord::color(Color::textOnAccent).name(),
+              discord::color(Color::accentHover).name(), discord::color(Color::accentPressed).name(),
+              discord::color(Color::fillSelected).name(), discord::muted().name()));
+    }
+
+    void arrange() {
+        if (m_arranging || !m_editor || !m_tabs || !m_send || !m_editor->parentWidget()) return;
+        QScopedValueRollback<bool> arranging(m_arranging, true);
+        if (m_editor->minimumHeight() != kComposerHeight || m_editor->maximumHeight() != kComposerHeight)
+            m_editor->setFixedHeight(kComposerHeight);
+        const int searchHeight = m_search && !m_search->isHidden() ? m_search->sizeHint().height() : 0;
+        const int spacing = foundation::gapNormal;
+        const int reserve = kComposerHeight + spacing + kComposerBottomGap +
+                            (searchHeight > 0 ? searchHeight + spacing : 0);
+        if (reserve != m_reserve) {
+            m_reserve = reserve;
+            m_tabs->setStyleSheet(m_tabStyle + QStringLiteral(
+                "\nQTabWidget#ChatTabWidget::pane { padding-bottom:%1px; }")
+                .arg(reserve));
+        }
+        const QRect tabBounds = m_tabs->geometry();
+        const int left = tabBounds.left() + kComposerInset;
+        const int width = qMax(1, tabBounds.width() - 2 * kComposerInset);
+        const int top = tabBounds.bottom() + 1 - kComposerBottomGap - kComposerHeight;
+        if (top < 0) return;
+        setGeometry(m_editor, QRect(left, top, width, kComposerHeight));
+        setGeometry(m_send, QRect(qMax(0, width - kSendInset - kSendWidth),
+                                  (kComposerHeight - kSendHeight) / 2, kSendWidth, kSendHeight));
+        centerEditorText();
+        m_editor->raise();
+        m_send->raise();
+        if (searchHeight > 0) {
+            setGeometry(m_search, QRect(left, top - spacing - searchHeight, width, searchHeight));
+            m_search->raise();
+        }
+        refreshButton();
+    }
+
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override {
+        switch (event->type()) {
+        case QEvent::InputMethod:
+            if (object == m_editor) {
+                m_preediting = !static_cast<QInputMethodEvent*>(event)->preeditString().isEmpty();
+                refreshButton();
+            }
+            break;
+        case QEvent::FocusOut:
+            if (object == m_editor) m_preediting = false;
+            schedule();
+            break;
+        case QEvent::EnabledChange:
+        case QEvent::ReadOnlyChange:
+        case QEvent::DynamicPropertyChange:
+        case QEvent::Move:
+        case QEvent::Resize:
+        case QEvent::Show:
+        case QEvent::Hide:
+        case QEvent::LayoutRequest:
+            schedule();
+            break;
+        default:
+            break;
+        }
+        return QObject::eventFilter(object, event);
+    }
+
+private:
+    struct Slot {
+        QPointer<QLayout> layout;
+        QPointer<QWidget> placeholder;
+    };
+
+    static bool takeSlot(QLayout* layout, Slot& slot, QWidget* widget) {
+        if (!layout) return false;
+        auto* placeholder = new QWidget(widget->parentWidget());
+        placeholder->hide();
+        auto* item = layout->replaceWidget(widget, placeholder);
+        if (!item) {
+            delete placeholder;
+            return false;
+        }
+        slot = {layout, placeholder};
+        delete item;
+        return true;
+    }
+
+    static void restoreSlot(const Slot& slot, QWidget* widget) {
+        if (!slot.placeholder) return;
+        if (slot.layout && widget) delete slot.layout->replaceWidget(slot.placeholder, widget);
+        delete slot.placeholder.data();
+    }
+
+    static void setGeometry(QWidget* widget, const QRect& bounds) {
+        if (widget->geometry() != bounds) widget->setGeometry(bounds);
+    }
+
+    void setEditorPadding(int top) {
+        if (top == m_editorPadding) return;
+        m_editorPadding = top;
+        m_editor->setStyleSheet(m_editorStyle + QStringLiteral(
+            "\nQTextEdit#ChatLineEdit { padding:%1px %2px 0 10px; border-radius:8px; }")
+            .arg(top).arg(kSendWidth + kSendInset + foundation::gapNormal));
+    }
+
+    void centerEditorText() {
+        // Measure the native line, including the document margin. The client
+        // can change these metrics when it replaces its placeholder or draft.
+        if (m_preediting || !m_editor->isVisible()) return;
+        const QTextCursor firstLine(m_editor->document());
+        const QRect caret = m_editor->cursorRect(firstLine);
+        if (caret.height() <= 0) return;
+        const int naturalTop = m_editor->viewport()->y() - m_editorPadding +
+                               caret.y() + m_editor->verticalScrollBar()->value();
+        const int padding = qBound(0, qRound((kComposerHeight - caret.height()) / 2.0) - naturalTop,
+                                   qMax(0, kComposerHeight - caret.height() - 2));
+        setEditorPadding(padding);
+    }
+
+    bool canSend() const {
+        if (!m_editor || !m_editor->isEnabled() || m_editor->isReadOnly() || m_preediting ||
+            m_editor->property("helpTextVisible").toBool() || m_editor->toPlainText().trimmed().isEmpty())
+            return false;
+        if (const auto* layout = m_editor->textCursor().block().layout()) {
+            if (!layout->preeditAreaText().isEmpty()) return false;
+        }
+        if (!g_funcs.getCurrentServerConnectionHandlerID || !g_funcs.getConnectionStatus) return false;
+        const uint64 server = g_funcs.getCurrentServerConnectionHandlerID();
+        int status = STATUS_DISCONNECTED;
+        return server && g_funcs.getConnectionStatus(server, &status) == ERROR_ok &&
+               status == STATUS_CONNECTION_ESTABLISHED;
+    }
+
+    void refreshButton() {
+        if (m_send) m_send->setEnabled(canSend());
+    }
+
+    void schedule() {
+        if (m_arranging || m_pending) return;
+        m_pending = true;
+        QTimer::singleShot(0, this, [this] {
+            m_pending = false;
+            arrange();
+        });
+    }
+
+    QPointer<QTextEdit> m_editor;
+    QPointer<QTabWidget> m_tabs;
+    QPointer<QPushButton> m_send;
+    QPointer<QWidget> m_search;
+    QPointer<QWidget> m_emoticon;
+    Slot m_editorSlot;
+    Slot m_searchSlot;
+    QString m_tabStyle;
+    QString m_editorStyle;
+    QTabWidget::TabPosition m_tabPosition;
+    int m_reserve = -1;
+    int m_editorPadding = -1;
+    bool m_installed = false;
+    bool m_emoticonHidden = false;
+    bool m_preediting = false;
+    bool m_arranging = false;
+    bool m_pending = false;
+};
+
+QPointer<ChatComposer> g_chatComposer;
+
+// Lock the editor itself so native placeholder and focus changes cannot
+// resize the row and move the tab bar. The pane still belongs to its layout.
+void stabilizeChatComposer() {
+    const int height = g_chatComposer ? kComposerHeight : foundation::controlHeight + 2;
+    if (g_saved.composer && (g_saved.composer->minimumHeight() != height ||
+                             g_saved.composer->maximumHeight() != height))
+        g_saved.composer->setFixedHeight(height);
+}
+
 void applyLayout() {
     if (g_layoutApplied) return;
     QWidget* chat = findWidget("MainWindowChatWidget");
@@ -405,6 +767,33 @@ void applyLayout() {
     g_saved.innerOrientation = inner->orientation();
     g_saved.outerSizes = outer->sizes();
     g_saved.innerSizes = inner->sizes();
+    g_saved.outerSizing = {};
+    g_saved.innerSizing = {};
+    g_saved.chatLayout = chat->layout();
+    g_saved.composer = chat->findChild<QTextEdit*>(QStringLiteral("ChatLineEdit"), Qt::FindDirectChildrenOnly);
+    if (g_saved.composer) {
+        g_saved.composerMinimumHeight = g_saved.composer->minimumHeight();
+        g_saved.composerMaximumHeight = g_saved.composer->maximumHeight();
+        stabilizeChatComposer();
+    }
+    if (g_saved.chatLayout) {
+        g_saved.chatMargins = g_saved.chatLayout->contentsMargins();
+        g_saved.chatSpacing = g_saved.chatLayout->spacing();
+        // The content host supplies the outer inset. Space only the controls
+        // inside the column so its card and composer share the same edges.
+        g_saved.chatLayout->setContentsMargins(0, 0, 0, 0);
+        g_saved.chatLayout->setSpacing(foundation::gapTight);
+    }
+
+    if (g_saved.composer) {
+        auto* tabs = chat->findChild<QTabWidget*>(QStringLiteral("ChatTabWidget"), Qt::FindDirectChildrenOnly);
+        if (tabs) {
+            auto* composer = new ChatComposer(g_saved.composer, tabs, chat);
+            if (composer->install()) g_chatComposer = composer;
+            else delete composer;
+            stabilizeChatComposer();
+        }
+    }
 
     outer->setOrientation(Qt::Horizontal);
     inner->setOrientation(Qt::Vertical);
@@ -421,6 +810,7 @@ void applyLayout() {
     lockSplitter(inner);
 
     g_layoutApplied = true;
+    installContentHost(outer);
     logLine(QString("layout applied: content-first (%1x%2), sidebar %3, tree/info %4/%5")
                 .arg(total).arg(height).arg(columns.value(0)).arg(rows.value(0)).arg(height - rows.value(0)));
 }
@@ -454,20 +844,34 @@ void updateLayout() {
 // tab switch or reconnect can rebuild the splitters.
 void pinSplitterSizes() {
     if (!g_layoutApplied) return;
-    if (g_saved.outer) {
-        const int total = g_saved.outer->width();
-        if (total > 0) g_saved.outer->setSizes(sidebarSizes(total, g_saved.outer->count()));
-        lockSplitter(g_saved.outer);
-    }
-    if (g_saved.inner && g_saved.inner->count() >= 2) {
-        const int height = g_saved.inner->height();
-        if (height > 0) g_saved.inner->setSizes(treeSizes(height));
-        lockSplitter(g_saved.inner);
-    }
+    const auto applySizes = [](QSplitter* splitter, SplitterSizing& sizing, const QList<int>& sizes) {
+        QList<bool> visible;
+        for (int i = 0; i < splitter->count(); ++i) visible.append(!splitter->widget(i)->isHidden());
+        if (sizing.requestedSizes == sizes && sizing.visibleChildren == visible) return;
+        // Qt adjusts the requested sizes for handle widths and minimum sizes.
+        // Compare requests so the heartbeat does not keep reapplying them.
+        sizing = {sizes, visible};
+        splitter->setSizes(sizes);
+        lockSplitter(splitter);
+    };
+    if (g_saved.outer && g_saved.outer->width() > 0)
+        applySizes(g_saved.outer, g_saved.outerSizing, sidebarSizes(g_saved.outer->width(), g_saved.outer->count()));
+    if (g_saved.inner && g_saved.inner->count() >= 2 && g_saved.inner->height() > 0)
+        applySizes(g_saved.inner, g_saved.innerSizing, treeSizes(g_saved.inner->height()));
 }
 
 void restoreLayout() {
     if (!g_layoutApplied) return;
+    delete g_chatComposer.data();
+    if (g_saved.composer) {
+        g_saved.composer->setMinimumHeight(g_saved.composerMinimumHeight);
+        g_saved.composer->setMaximumHeight(g_saved.composerMaximumHeight);
+        g_saved.composer = nullptr;
+    }
+    if (g_saved.chatLayout) {
+        g_saved.chatLayout->setContentsMargins(g_saved.chatMargins);
+        g_saved.chatLayout->setSpacing(g_saved.chatSpacing);
+    }
     if (g_saved.outer) {
         unlockSplitter(g_saved.outer);
         g_saved.outer->setOrientation(g_saved.outerOrientation);
@@ -522,9 +926,125 @@ void dumpRoles() {
 
 void queueTreeRefresh();
 
+class TreeWheelMotion : public QObject {
+public:
+    explicit TreeWheelMotion(QObject* parent) : QObject(parent) {
+        m_motion.setDuration(foundation::motionDuration);
+        m_motion.setEasingCurve(foundation::motionEasing());
+        m_motion.setStartValue(0.0);
+        m_motion.setEndValue(1.0);
+        connect(&m_motion, &QVariantAnimation::valueChanged, this, [this](const QVariant& progress) {
+            if (!m_tree || !m_tree->isVisible() || !m_bar || !foundation::animationsEnabled()) {
+                stop();
+                return;
+            }
+            QScopedValueRollback<bool> ownWrite(m_writing, true);
+            m_bar->setValue(m_start + qRound((m_target - m_start) * progress.toReal()));
+        });
+    }
+
+    ~TreeWheelMotion() override { bind(nullptr); }
+
+    void bind(QTreeView* tree) {
+        const bool animate = tree && foundation::animationsEnabled();
+        if (!animate) tree = nullptr;
+        if (tree == m_tree && (!tree || (m_viewport == tree->viewport() &&
+                                        m_bar == tree->verticalScrollBar()))) return;
+        stop();
+        if (m_viewport) m_viewport->removeEventFilter(this);
+        if (m_bar) {
+            m_bar->removeEventFilter(this);
+            disconnect(m_bar, nullptr, this, nullptr);
+        }
+        if (m_tree) {
+            m_tree->removeEventFilter(this);
+            setScrollMode(m_tree, m_originalMode);
+        }
+        m_tree = tree;
+        m_viewport = tree ? tree->viewport() : nullptr;
+        m_bar = tree ? tree->verticalScrollBar() : nullptr;
+        if (!tree) return;
+        m_originalMode = tree->verticalScrollMode();
+        setScrollMode(tree, QAbstractItemView::ScrollPerPixel);
+        tree->installEventFilter(this);
+        m_viewport->installEventFilter(this);
+        m_bar->installEventFilter(this);
+        connect(m_bar, &QScrollBar::valueChanged, this, [this] { if (!m_writing) stop(); });
+        connect(m_bar, &QScrollBar::rangeChanged, this, [this] { stop(); });
+        connect(m_bar, &QScrollBar::sliderPressed, this, [this] { stop(); });
+        connect(m_bar, &QScrollBar::actionTriggered, this, [this] { stop(); });
+    }
+
+    void stop() { m_motion.stop(); }
+
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override {
+        switch (event->type()) {
+        case QEvent::Wheel:
+            if (object == m_viewport && scroll(static_cast<QWheelEvent*>(event))) return true;
+            stop();
+            break;
+        case QEvent::Hide:
+        case QEvent::FocusOut:
+        case QEvent::KeyPress:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::DragEnter:
+            stop();
+            break;
+        default:
+            break;
+        }
+        return QObject::eventFilter(object, event);
+    }
+
+private:
+    static void setScrollMode(QTreeView* tree, QAbstractItemView::ScrollMode mode) {
+        if (tree->verticalScrollMode() == mode) return;
+        const QModelIndex top = tree->indexAt(QPoint(tree->indentation() + 1, 0));
+        tree->setVerticalScrollMode(mode);
+        if (top.isValid()) tree->scrollTo(top, QAbstractItemView::PositionAtTop);
+    }
+
+    bool scroll(QWheelEvent* event) {
+        if (!m_tree || !m_tree->isVisible() || !m_bar || m_bar->isSliderDown() ||
+            !foundation::isMouseWheelNotch(*event) || !foundation::animationsEnabled()) return false;
+        const int current = m_bar->value();
+        const bool running = m_motion.state() == QAbstractAnimation::Running;
+        const int base = running ? m_target : current;
+        const int target = foundation::wheelTarget(*m_bar, base, event->angleDelta().y());
+        if (target == base && !running) return false;
+        if (target != base) {
+            stop();
+            m_start = current;
+            m_target = target;
+            if (current != target) m_motion.start();
+        }
+        event->accept();
+        return true;
+    }
+
+    QPointer<QTreeView> m_tree;
+    QPointer<QWidget> m_viewport;
+    QPointer<QScrollBar> m_bar;
+    QAbstractItemView::ScrollMode m_originalMode = QAbstractItemView::ScrollPerItem;
+    QVariantAnimation m_motion;
+    bool m_writing = false;
+    int m_start = 0;
+    int m_target = 0;
+};
+
+QPointer<TreeWheelMotion> g_treeWheelMotion;
+
+void syncTreeWheel(QTreeView* tree) {
+    if (!g_treeWheelMotion && tree) g_treeWheelMotion = new TreeWheelMotion(g_guard);
+    if (g_treeWheelMotion) g_treeWheelMotion->bind(tree);
+}
+
 // Keep the stock ServerTreeView (native model, ordering and event handling),
 // paint its rows in the Discord-light style, and pin our user panel below it.
 void styleTree(QTreeView* tree) {
+    syncTreeWheel(tree && tree->isVisible() ? tree : nullptr);
     if (!tree) return;
     // Same widget and still carrying our delegate: nothing to do. If the client
     // rebuilt the tree (reconnect, tab switch) the pointer matches but the
@@ -537,8 +1057,10 @@ void styleTree(QTreeView* tree) {
             g_styledTree->setItemDelegate(it.value());
     }
 
-    if (!g_oldDelegates.contains(tree))
+    if (!g_oldDelegates.contains(tree)) {
         g_oldDelegates.insert(tree, tree->itemDelegate());
+        QObject::connect(tree, &QObject::destroyed, [tree] { g_oldDelegates.remove(tree); });
+    }
 
     if (!g_treeRows) {
         auto* rows = new NativeTreeRows(tree);
@@ -585,20 +1107,105 @@ QWidget* findBanner() {
 
 void updateChatOverlay();
 
+QWidget* ensureCardHost(QTabWidget* tabs) {
+    if (g_cardHost) return g_cardHost->parentWidget() == tabs ? g_cardHost.data() : nullptr;
+    auto* stack = tabs->findChild<QStackedWidget*>(QStringLiteral("qt_tabwidget_stackedwidget"),
+                                                   Qt::FindDirectChildrenOnly);
+    if (!stack) return nullptr;
+    auto* host = new QWidget(tabs);
+    host->setObjectName(QStringLiteral("FlatCardHost"));
+    host->hide();
+    g_cardHost = host;
+    g_chatStack = stack;
+    return host;
+}
+
+void layoutCardHost() {
+    if (!g_cardHost || !g_chatStack) return;
+    stabilizeChatComposer();
+    if (g_chatComposer) g_chatComposer->arrange();
+    const QRect target = g_chatStack->geometry();
+    if (target.isEmpty() || g_chatStack->parentWidget() != g_cardHost->parentWidget()) return;
+    if (g_cardHost->geometry() != target) g_cardHost->setGeometry(target);
+    const QRect bounds = g_cardHost->rect();
+    if (g_infoPage && g_infoPage->geometry() != bounds) g_infoPage->setGeometry(bounds);
+    if (g_modernChat && g_modernChat->geometry() != bounds) g_modernChat->setGeometry(bounds);
+}
+
+// Fade a tint over the live page. The page and its contents stay in place.
+class PageTransition : public QWidget {
+public:
+    explicit PageTransition(QWidget* page) : QWidget(page) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFocusPolicy(Qt::NoFocus);
+        m_fade.setDuration(foundation::motionDuration);
+        m_fade.setEasingCurve(foundation::motionEasing());
+        m_fade.setStartValue(0.0);
+        m_fade.setEndValue(1.0);
+        connect(&m_fade, &QVariantAnimation::valueChanged, this, [this] { update(); });
+        connect(&m_fade, &QVariantAnimation::finished, this, [this] { finish(); });
+        page->installEventFilter(this);
+        hide();
+    }
+
+    static void play(QWidget* page) {
+        if (!page || !page->isVisible() || page->rect().isEmpty()) return;
+        auto* transition = page->findChild<QWidget*>(QStringLiteral("FlatPageTransition"),
+                                                    Qt::FindDirectChildrenOnly);
+        auto* fade = dynamic_cast<PageTransition*>(transition);
+        if (fade) fade->finish();
+        if (!foundation::animationsEnabled()) return;
+        if (!fade) {
+            fade = new PageTransition(page);
+            fade->setObjectName(QStringLiteral("FlatPageTransition"));
+        }
+        fade->setGeometry(page->rect());
+        fade->m_fade.start();
+        fade->show();
+        fade->raise();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        QColor tint = discord::color(Color::bgCanvas);
+        tint.setAlphaF(0.22 * (1.0 - m_fade.currentValue().toReal()));
+        painter.fillRect(rect(), tint);
+    }
+
+    bool eventFilter(QObject* object, QEvent* event) override {
+        if (object == parent() && (event->type() == QEvent::Resize || event->type() == QEvent::Hide))
+            finish();
+        return QWidget::eventFilter(object, event);
+    }
+
+private:
+    void finish() {
+        m_fade.stop();
+        hide();
+    }
+
+    QVariantAnimation m_fade;
+};
+
 void showInfoPage() {
-    if (!g_chatStack || !g_infoPage) return;
-    g_infoPage->setGeometry(g_chatStack->geometry());
+    if (!g_cardHost || !g_chatStack || !g_infoPage) return;
+    if (g_modernChat) g_modernChat->finishWheelScroll();
+    g_infoShown = true;
+    layoutCardHost();
+    g_cardHost->show();
+    g_cardHost->raise();
     g_infoPage->show();
     g_infoPage->raise();
-    g_infoShown = true;
     updateChatOverlay();
+    PageTransition::play(g_infoPage);
 }
 
 void hideInfoPage() {
-    if (!g_infoPage) return;
-    g_infoPage->hide();
+    if (!g_infoPage || !g_infoShown) return;
     g_infoShown = false;
     updateChatOverlay();
+    if (g_infoPage) g_infoPage->hide();
 }
 
 // ------------------------------------------------------------- theme mode
@@ -650,42 +1257,93 @@ DwmSetWindowAttributeFn dwmSetWindowAttribute() {
     return fn;
 }
 
-// Dark caption for every top-level window the client owns, including dialogs
-// that appear after startup. DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on Windows 10
-// 2004+ and 19 on older builds; the unused call just fails harmlessly.
-void applyWindowFrame(bool dark) {
+enum class WindowFrameMode { Native, Dark, FlatLight, FlatDark };
+
+struct WindowFrame {
+    QPointer<QWidget> widget;
+    WindowFrameMode mode;
+};
+
+QHash<quintptr, WindowFrame> g_windowFrames;
+
+void setWindowFrame(HWND window, WindowFrameMode mode) {
     const auto setAttribute = dwmSetWindowAttribute();
     if (!setAttribute) return;
-    // The widget is part of the key: Windows reuses HWND values, and a new
-    // dialog must not inherit a stale "already dark" entry.
-    static QHash<quintptr, QPointer<QWidget>> darkened;
-    for (auto it = darkened.begin(); it != darkened.end();) {
-        if (!it.value()) it = darkened.erase(it);
+    const bool dark = mode == WindowFrameMode::Dark || mode == WindowFrameMode::FlatDark;
+    const BOOL immersive = dark ? TRUE : FALSE;
+    if (FAILED(setAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive, sizeof(immersive)))) {
+        // Older Windows 10 builds used 19 for immersive dark mode.
+        setAttribute(window, 19, &immersive, sizeof(immersive));
+    }
+
+    COLORREF caption = DWMWA_COLOR_DEFAULT;
+    COLORREF text = DWMWA_COLOR_DEFAULT;
+    COLORREF border = DWMWA_COLOR_DEFAULT;
+    if (mode == WindowFrameMode::FlatLight || mode == WindowFrameMode::FlatDark) {
+        const auto frameColor = [dark](Color role) {
+            const QColor color = foundation::color(role, dark);
+            return RGB(color.red(), color.green(), color.blue());
+        };
+        caption = frameColor(Color::bgCanvas);  // Same background as QMenuBar.
+        text = frameColor(Color::textPrimary);
+        border = frameColor(Color::strokeDivider);
+    }
+    const DWM_WINDOW_CORNER_PREFERENCE corners = caption == DWMWA_COLOR_DEFAULT
+        ? DWMWCP_DEFAULT : DWMWCP_ROUND;
+    setAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
+    // Explicit colors are supported on Windows 11. Older builds keep the
+    // system caption with the immersive dark preference above.
+    const HRESULT captionResult = setAttribute(window, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    const HRESULT textResult = setAttribute(window, DWMWA_TEXT_COLOR, &text, sizeof(text));
+    const HRESULT borderResult = setAttribute(window, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    if (caption != DWMWA_COLOR_DEFAULT) {
+        if (SUCCEEDED(captionResult) && SUCCEEDED(textResult) && SUCCEEDED(borderResult)) {
+            const QColor applied(GetRValue(caption), GetGValue(caption), GetBValue(caption));
+            logLine(QStringLiteral("window frame palette applied: %1").arg(applied.name()));
+        } else {
+            logLine(QStringLiteral("window frame palette unavailable (caption=0x%1, text=0x%2, border=0x%3)")
+                        .arg(static_cast<quint32>(captionResult), 8, 16, QLatin1Char('0'))
+                        .arg(static_cast<quint32>(textResult), 8, 16, QLatin1Char('0'))
+                        .arg(static_cast<quint32>(borderResult), 8, 16, QLatin1Char('0')));
+        }
+    }
+}
+
+void resetWindowFrames() {
+    for (auto it = g_windowFrames.cbegin(); it != g_windowFrames.cend(); ++it) {
+        if (it->widget && it->widget->internalWinId() == it.key())
+            setWindowFrame(reinterpret_cast<HWND>(it.key()), WindowFrameMode::Native);
+    }
+    g_windowFrames.clear();
+}
+
+void applyWindowFrame(bool dark) {
+    if (!dwmSetWindowAttribute()) return;
+    const QString stylesheet = qApp->styleSheet();
+    const bool flat = stylesheet.contains(QLatin1String("flat_dark"), Qt::CaseInsensitive) ||
+                      stylesheet.contains(QLatin1String("flat_white"), Qt::CaseInsensitive);
+    const WindowFrameMode mode = flat ? (dark ? WindowFrameMode::FlatDark : WindowFrameMode::FlatLight)
+                                      : (dark ? WindowFrameMode::Dark : WindowFrameMode::Native);
+    // Windows can reuse an HWND after a dialog closes or recreates its surface.
+    for (auto it = g_windowFrames.begin(); it != g_windowFrames.end();) {
+        if (!it->widget || it->widget->internalWinId() != it.key()) it = g_windowFrames.erase(it);
         else ++it;
+    }
+    if (mode == WindowFrameMode::Native) {
+        resetWindowFrames();
+        return;
     }
     for (QWidget* w : QApplication::topLevelWidgets()) {
         if (!w || !w->isWindow() || !w->isVisible()) continue;
         const Qt::WindowType type = w->windowType();
-        if (type == Qt::Popup || type == Qt::ToolTip) continue;
+        if (type == Qt::Popup || type == Qt::ToolTip || w->windowFlags().testFlag(Qt::FramelessWindowHint))
+            continue;
         const quintptr handle = static_cast<quintptr>(w->winId());
         if (!handle) continue;
-        const bool known = darkened.contains(handle) && darkened.value(handle) == w;
-        if (dark && !known) {
-            BOOL on = TRUE;
-            setAttribute(reinterpret_cast<HWND>(handle), 20, &on, sizeof(on));
-            setAttribute(reinterpret_cast<HWND>(handle), 19, &on, sizeof(on));
-            // Win11 also tints the 1px frame; without this it stays light.
-            const COLORREF border = RGB(0x2A, 0x2D, 0x33);
-            setAttribute(reinterpret_cast<HWND>(handle), 34, &border, sizeof(border));
-            darkened[handle] = w;
-        } else if (!dark && darkened.contains(handle)) {
-            BOOL off = FALSE;
-            setAttribute(reinterpret_cast<HWND>(handle), 20, &off, sizeof(off));
-            setAttribute(reinterpret_cast<HWND>(handle), 19, &off, sizeof(off));
-            const COLORREF fallback = 0xFFFFFFFE;  // DWMWA_COLOR_DEFAULT
-            setAttribute(reinterpret_cast<HWND>(handle), 34, &fallback, sizeof(fallback));
-            darkened.remove(handle);
-        }
+        const auto existing = g_windowFrames.constFind(handle);
+        if (existing != g_windowFrames.cend() && existing->widget == w && existing->mode == mode) continue;
+        setWindowFrame(reinterpret_cast<HWND>(handle), mode);
+        g_windowFrames.insert(handle, {w, mode});
     }
 }
 
@@ -716,6 +1374,11 @@ class FrameFilter : public QObject {
 public:
     explicit FrameFilter(QObject* parent = nullptr) : QObject(parent) {}
     bool eventFilter(QObject* obj, QEvent* ev) override {
+        if ((ev->type() == QEvent::Show || ev->type() == QEvent::Hide) &&
+            obj->objectName() == QLatin1String("ServerTreeView")) {
+            if (ev->type() == QEvent::Hide && g_treeWheelMotion) g_treeWheelMotion->stop();
+            queueTreeRefresh();
+        }
         if (ev->type() == QEvent::Resize) {
             auto* w = qobject_cast<QWidget*>(obj);
             if (w && w->isWindow() &&
@@ -725,7 +1388,7 @@ public:
             auto* w = qobject_cast<QWidget*>(obj);
             if (w && w->isWindow()) {
                 stabilizeVolumeDialog(w);
-                if (g_darkMode == 1) applyWindowFrame(true);
+                if (g_darkMode >= 0) applyWindowFrame(detectDarkTheme());
             }
         }
         return QObject::eventFilter(obj, ev);
@@ -734,17 +1397,36 @@ public:
 
 QPointer<QObject> g_frameFilter;
 
-QString pushButtonStyle(const QColor& bg, const QColor& border, const QColor& text,
-                        const QColor& hoverBg, const QColor& hoverBorder,
-                        const QColor& pressedBg) {
+QString infoBackButtonStyle() {
     return QStringLiteral(
-               "QPushButton { background:%1; border:1px solid %2; border-radius:7px;"
-               " color:%3; font-family:'Microsoft YaHei UI'; font-size:10pt; padding:2px 10px; }"
-               "QPushButton:hover { background:%4; border-color:%5; }"
-               "QPushButton:pressed { background:%6; }")
-        .arg(bg.name(), border.name(), text.name(), hoverBg.name(), hoverBorder.name(),
-             pressedBg.name());
+               "QPushButton { background:transparent; border:1px solid transparent;"
+               " color:%1; border-radius:%2px; padding:0 %3px; }"
+               "QPushButton:hover { background:%4; color:%5; }"
+               "QPushButton:pressed { background:%6; }"
+               "QPushButton:focus { border-color:%7; }")
+        .arg(discord::muted().name())
+        .arg(foundation::radiusControl)
+        .arg(foundation::gapNormal)
+        .arg(discord::hover().name(), discord::ink().name(),
+             discord::color(Color::fillPressed).name(), discord::color(Color::focus).name());
 }
+
+QIcon infoBackIcon(const QWidget* button) {
+    const qreal scale = button->devicePixelRatioF();
+    constexpr int size = 16;
+    QPixmap image(qRound(size * scale), qRound(size * scale));
+    image.setDevicePixelRatio(scale);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(discord::muted(), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawLine(QPointF(3.5, 8), QPointF(12.5, 8));
+    painter.drawPolyline(QPolygonF{QVector<QPointF>{{7.5, 4}, {3.5, 8}, {7.5, 12}}});
+    painter.end();
+    return QIcon(image);
+}
+
+void refreshUnreadDotIcons();
 
 // Repaints every widget the plugin owns. The client's own widgets are handled
 // by the theme's stylesheet, so this only covers our sidebar, user panel, chat
@@ -757,48 +1439,82 @@ void applyPluginTheme(bool dark) {
                                      .arg(discord::bg().name(), discord::divider().name()));
     }
     if (g_infoBack) {
-        g_infoBack->setStyleSheet(pushButtonStyle(discord::input(), discord::divider(),
-                                                  discord::ink(), discord::inputFocus(),
-                                                  discord::muted(), discord::selected()));
+        g_infoBack->setStyleSheet(infoBackButtonStyle());
+        g_infoBack->setIcon(infoBackIcon(g_infoBack));
     }
     if (g_infoTitle) {
         g_infoTitle->setStyleSheet(
             QStringLiteral("QLabel { border:none; background:transparent; color:%1;"
-                           " font-family:'Microsoft YaHei UI'; font-size:11pt; font-weight:600; }")
-                .arg(discord::ink().name()));
+                           " font-family:'%2'; font-size:%3px; font-weight:600; }")
+                .arg(discord::ink().name(), QString::fromLatin1(foundation::fontFamily))
+                .arg(foundation::bodyLargeSize));
     }
     if (g_infoStatus) {
         g_infoStatus->setStyleSheet(
-            QStringLiteral("QLabel { background:%1; color:%2; padding:2px 16px 8px 16px;"
-                           " font-family:'Microsoft YaHei UI'; font-size:10pt; }")
-                .arg(discord::bg().name(), discord::muted().name()));
+            QStringLiteral("QLabel { background:%1; color:%2; padding:%3px %4px %5px;"
+                           " font-family:'%6'; font-size:%7px; }")
+                .arg(discord::bg().name(), discord::muted().name())
+                .arg(foundation::gapTight)
+                .arg(foundation::gapLoose)
+                .arg(foundation::gapNormal)
+                .arg(QString::fromLatin1(foundation::fontFamily))
+                .arg(foundation::bodySize));
     }
+    if (g_chatComposer) g_chatComposer->refreshTheme();
     if (g_modernChat) g_modernChat->applyTheme();
     if (g_notifyToast) g_notifyToast->update();
+    refreshUnreadDotIcons();
     if (g_chatHeader) g_chatHeader->update();
     if (g_userPanel) g_userPanel->update();
     if (g_styledTree) g_styledTree->viewport()->update();
     applyLinkPalette();
 }
 
+void mountBanner(QWidget* banner, QVBoxLayout* target, int index) {
+    g_banner = banner;
+    g_bannerHome = banner->parentWidget();
+    g_bannerMaximumHeight = banner->maximumHeight();
+    g_bannerWasVisible = !banner->isHidden();
+    g_bannerIndex = -1;
+    g_bannerStretch = 0;
+    if (g_bannerHome) {
+        if (auto* box = qobject_cast<QBoxLayout*>(g_bannerHome->layout())) {
+            g_bannerIndex = box->indexOf(banner);
+            if (g_bannerIndex >= 0) g_bannerStretch = box->stretch(g_bannerIndex);
+        }
+    }
+    banner->setMaximumHeight(qMin(g_bannerMaximumHeight, 240));
+    banner->hide();
+    target->insertWidget(index, banner);
+}
+
 void installInfoTab() {
     if (g_infoPage) return;
     auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"));
     if (!tw) return;
-    auto* stack = tw->findChild<QStackedWidget*>(QStringLiteral("qt_tabwidget_stackedwidget"));
-    if (!stack) return;
+    QWidget* host = ensureCardHost(tw);
+    if (!host) return;
     QWidget* info = findWidget("InfoFrame");
     if (!info) return;
 
     g_infoFrame = info;
     g_infoHome = info->parentWidget();
-    g_infoSplitter = qobject_cast<QSplitter*>(info->parentWidget());
+    g_infoSplitter = qobject_cast<QSplitter*>(g_infoHome.data());
+    g_infoIndex = g_infoSplitter ? g_infoSplitter->indexOf(info) : -1;
+    g_infoStretch = 0;
+    g_infoAlignment = {};
+    if (g_infoHome && !g_infoSplitter) {
+        if (auto* box = qobject_cast<QBoxLayout*>(g_infoHome->layout())) {
+            g_infoIndex = box->indexOf(info);
+            if (g_infoIndex >= 0) {
+                g_infoStretch = box->stretch(g_infoIndex);
+                g_infoAlignment = box->itemAt(g_infoIndex)->alignment();
+            }
+        }
+    }
 
-    auto* page = new QWidget(tw);
-    // The info content (client details, server banner) has a tall natural size
-    // hint. As a child of the chat stack it propagates upward and the main
-    // window grows when a user is selected, so the page is explicitly
-    // non-constraining: it follows the stack, never sizes it.
+    auto* page = new QWidget(host);
+    // The card follows the native stack's geometry without joining its layout.
     page->setMinimumSize(0, 0);
     page->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     auto* v = new QVBoxLayout(page);
@@ -806,16 +1522,20 @@ void installInfoTab() {
     v->setSpacing(0);
 
     auto* bar = new QWidget(page);
-    bar->setFixedHeight(48);
+    bar->setFixedHeight(foundation::controlHeight + 2 * foundation::gapNormal);
     auto* h = new QHBoxLayout(bar);
-    h->setContentsMargins(10, 0, 12, 0);
-    h->setSpacing(6);
-    auto* back = new QPushButton(QStringLiteral("‹ 聊天"), bar);
+    h->setContentsMargins(foundation::gapLoose, 0, foundation::gapLoose, 0);
+    h->setSpacing(foundation::gapNormal);
+    auto* back = new QPushButton(QStringLiteral("返回聊天"), bar);
+    back->setObjectName(QStringLiteral("FlatInfoBackButton"));
+    back->setIconSize(QSize(16, 16));
+    back->setFont(discord::font(foundation::bodySize));
     back->setCursor(Qt::PointingHandCursor);
-    back->setFixedHeight(26);
+    back->setFixedHeight(foundation::controlHeight);
     auto* title = new QLabel(QStringLiteral("信息"), bar);
-    h->addWidget(back);
+    title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     h->addWidget(title, 1);
+    h->addWidget(back);
     v->addWidget(bar);
     g_infoBar = bar;
     g_infoBack = back;
@@ -825,29 +1545,16 @@ void installInfoTab() {
     v->addWidget(status);
     g_infoStatus = status;
 
-    if (QWidget* banner = findBanner()) {
-        g_banner = banner;
-        g_bannerHome = banner->parentWidget();
-        banner->setMaximumHeight(240);
-        banner->hide();
-        v->addWidget(banner);
-    }
+    if (QWidget* banner = findBanner()) mountBanner(banner, v, v->count());
     v->addWidget(info, 1);
 
     QObject::connect(back, &QPushButton::clicked, page, [] { hideInfoPage(); });
-    if (QTabBar* tb = tw->tabBar()) {
-        QObject::connect(tb, &QTabBar::tabBarClicked, page, [](int) { hideInfoPage(); });
-    }
-    QObject::connect(tw, &QTabWidget::currentChanged, page, [](int) {
-        if (g_infoShown) hideInfoPage();
-    });
 
     // The info view floats above the chat stack instead of joining it: the
     // client's ChatTabWidget assumes every stack page is a chat tab, and adding
     // one desynchronises the selected tab from the visible page.
     page->hide();
     g_infoPage = page;
-    g_chatStack = stack;
     g_infoTitle = title;
     info->show();
     const bool dark = detectDarkTheme();
@@ -945,12 +1652,13 @@ QString channelNameById(uint64 schid, uint64 channelId) {
     return result;
 }
 
-void appendSystemMessage(uint64 schid, const QString& text, int severity = 0) {
+void appendSystemMessage(uint64 schid, const QString& text, int severity = 0, bool poke = false) {
     ChatMessage msg;
     msg.text = text;
     msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
     msg.system = true;
     msg.severity = severity;
+    msg.poke = poke;
     const QString key = serverKey(schid);
     g_chatHistory[key].append(msg);
     if (g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
@@ -1045,14 +1753,11 @@ QWidget* mainWindowHost() {
     return nullptr;
 }
 
-// The card is parented to MainWindow rather than to a chat tab, so it stays
-// visible on every tab and moves with the window. A client rebuild of the main
-// window replaces it on the next notification. The card is permanent: its
-// click opens the conversation (onActivate) and then dismisses it.
+// Keep notifications above the content on every chat tab.
 void showToast(const QString& title, const QString& body,
                std::function<void()> onActivate = {}) {
     if (!qApp) return;
-    QWidget* host = mainWindowHost();
+    QWidget* host = g_contentHost ? g_contentHost.data() : mainWindowHost();
     if (!host) return;
     if (!g_notifyToast || g_notifyToast->parentWidget() != host) {
         if (g_notifyToast) delete g_notifyToast.data();
@@ -1134,26 +1839,52 @@ int chatTabIndexForName(const QString& name) {
     return -1;
 }
 
-QIcon unreadDotIcon() {
-    static QIcon icon;
-    if (icon.isNull()) {
+const QIcon& emptyUnreadDotIcon() {
+    static const QIcon icon = [] {
         QPixmap pm(16, 16);
         pm.fill(Qt::transparent);
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setPen(Qt::NoPen);
-        p.setBrush(discord::danger());
-        p.drawEllipse(QRectF(4, 4, 8, 8));
-        icon = QIcon(pm);
-    }
+        return QIcon(pm);
+    }();
     return icon;
+}
+
+const QIcon& unreadDotIcon(bool dark) {
+    static const auto icons = [] {
+        std::array<QIcon, 2> result;
+        for (int mode : {0, 1}) {
+            for (int scale : {1, 2}) {
+                QPixmap pm(16 * scale, 16 * scale);
+                pm.setDevicePixelRatio(scale);
+                pm.fill(Qt::transparent);
+                QPainter p(&pm);
+                p.setRenderHint(QPainter::Antialiasing);
+                p.setPen(Qt::NoPen);
+                p.setBrush(foundation::color(Color::accent, mode == 1));
+                p.drawEllipse(QRectF(4, 4, 8, 8));
+                p.end();
+                result[mode].addPixmap(pm);
+            }
+        }
+        return result;
+    }();
+    return icons[dark ? 1 : 0];
+}
+
+void refreshUnreadDotIcons() {
+    if (!g_chatTab) return;
+    const auto& previous = unreadDotIcon(!discord::isDark());
+    const auto& current = unreadDotIcon(discord::isDark());
+    for (int i = 1; i < g_chatTab->count(); ++i) {
+        if (g_chatTab->tabIcon(i).cacheKey() == previous.cacheKey())
+            g_chatTab->setTabIcon(i, current);
+    }
 }
 
 void markUnread(const QString& name) {
     if (!g_chatTab) return;
     const int index = chatTabIndexForName(name);
     if (index < 0 || index == g_chatTab->currentIndex()) return;
-    g_chatTab->setTabIcon(index, unreadDotIcon());
+    g_chatTab->setTabIcon(index, unreadDotIcon(discord::isDark()));
 }
 
 void focusMainWindow() {
@@ -1257,10 +1988,13 @@ void updateChatOverlay() {
         g_chatTab = tw;
         g_chatTabConn = QObject::connect(tw, &QTabWidget::currentChanged, tw, [](int index) {
             // Opening a conversation is what clears its unread marker.
-            if (g_chatTab && index >= 0 && !g_chatTab->tabIcon(index).isNull())
-                g_chatTab->setTabIcon(index, QIcon());
+            if (g_chatTab && index > 0 &&
+                g_chatTab->tabIcon(index).cacheKey() != emptyUnreadDotIcon().cacheKey())
+                g_chatTab->setTabIcon(index, emptyUnreadDotIcon());
             const QString before = g_overlayKey;
-            updateChatOverlay();
+            const bool wasInfoShown = g_infoShown;
+            if (wasInfoShown) hideInfoPage();
+            else updateChatOverlay();
             // Manually opening the conversation behind a card dismisses it. A
             // card that arrived while the user was already on that tab stays;
             // there was no switch. Private tabs may decorate the peer name, so
@@ -1279,38 +2013,45 @@ void updateChatOverlay() {
                  g_notifyTabName.contains(tab, Qt::CaseInsensitive));
             const bool targetOpen =
                 (!g_notifyKey.isEmpty() && g_overlayKey == g_notifyKey) || samePrivate;
-            if (g_overlayKey != before && targetOpen) {
+            if ((g_overlayKey != before || wasInfoShown) && targetOpen) {
                 clearNotifyTarget();
                 if (g_notifyToast) g_notifyToast->dismiss();
             }
         });
     }
+    for (int i = 1; i < g_chatTab->count(); ++i) {
+        if (g_chatTab->tabIcon(i).isNull()) g_chatTab->setTabIcon(i, emptyUnreadDotIcon());
+    }
+    QWidget* host = ensureCardHost(g_chatTab);
+    if (!host) return;
     if (!g_modernChat) {
-        auto* mc = new ModernChat(g_chatTab);
+        auto* mc = new ModernChat(host);
         mc->hide();
         g_modernChat = mc;
         g_overlayKey.clear();
         // currentChanged does not fire when the selected server tab is clicked.
         QObject::connect(g_chatTab->tabBar(), &QTabBar::tabBarClicked, mc, [mc](int index) {
-            if (index == 0 && g_chatTab->currentIndex() == 0 && !mc->isHidden())
-                mc->scrollToLatest();
+            // A different tab is committed by currentChanged. Only an already
+            // selected tab needs this path to reveal chat or jump to the end.
+            if (!g_chatTab || index < 0 || index != g_chatTab->currentIndex()) return;
+            if (g_infoShown) hideInfoPage();
+            else if (index == 0 && !mc->isHidden()) mc->scrollToLatest();
         });
         auto* filter = new OverlayFilter(g_chatTab);
-        filter->onLayout = [] { updateChatOverlay(); };
+        filter->onLayout = [] { layoutCardHost(); };
         g_chatTab->installEventFilter(filter);
+        g_chatStack->installEventFilter(filter);
         g_chatFilter = filter;
     }
 
-    if (g_infoShown && g_infoPage && g_chatStack) {
-        if (g_infoPage->geometry() != g_chatStack->geometry())
-            g_infoPage->setGeometry(g_chatStack->geometry());
+    layoutCardHost();
+    if (g_infoShown && g_infoPage) {
+        host->show();
+        host->raise();
         g_infoPage->raise();
     }
 
-    QWidget* page = g_chatTab->currentWidget();
-    // ChatTab is the scrollable log surface itself (custom-painted, not a
-    // QTextEdit), so its rectangle is exactly the area to replace.
-    QWidget* log = page;
+    QWidget* log = g_chatTab->currentWidget();
     const bool infoActive = g_infoShown;
 
     QString channelName;
@@ -1354,22 +2095,13 @@ void updateChatOverlay() {
 
     if (!showOverlay) {
         g_modernChat->hide();
+        if (!infoActive) host->hide();
         return;
     }
 
-    if (g_chatLog != log) {
-        if (g_chatFilter && g_chatLog) g_chatLog->removeEventFilter(g_chatFilter);
-        g_chatLog = log;
-        if (g_chatFilter) log->installEventFilter(g_chatFilter);
-    }
-    // Re-geometry every heartbeat made the chat input repaint mid-typing.
-    // Only touch the overlay when its target rectangle actually changed.
-    const QRect target(log->mapTo(g_chatTab, QPoint(0, 0)), log->size());
     const bool revealingLog = g_modernChat->isHidden();
-    if (g_modernChat->geometry() != target) g_modernChat->setGeometry(target);
-    if (revealingLog) g_modernChat->show();
-
     if (g_overlayKey != key) {
+        g_modernChat->finishWheelScroll();
         // Remember where the channel or private conversation being left was scrolled to.
         if (!g_overlayKey.isEmpty() && !g_overlayKey.startsWith(QLatin1String("s:")))
             g_chatScroll[g_overlayKey] =
@@ -1390,22 +2122,22 @@ void updateChatOverlay() {
         g_modernChat->setEmptyText(serverTab ? QStringLiteral("暂无服务器事件")
                                              : QStringLiteral("这里还没有消息，来打个招呼吧"));
         g_modernChat->setMessages(messages, serverTab ? -1 : g_chatScroll.value(key, -1));
-    } else if (serverTab && revealingLog) {
+    } else if (revealingLog && serverTab) {
         g_modernChat->scrollToLatest();
     }
+    host->show();
+    host->raise();
+    if (revealingLog) g_modernChat->show();
 }
 
 void attachBannerIfAny() {
     if (!g_infoPage || g_banner) return;
     QWidget* b = findBanner();
     if (!b) return;
-    g_banner = b;
-    g_bannerHome = b->parentWidget();
-    b->setMaximumHeight(240);
-    b->hide();
-    if (auto* v = qobject_cast<QVBoxLayout*>(g_infoPage->layout()))
-        v->insertWidget(v->count() - 1, b);
-    logLine("banner attached to info page");
+    if (auto* v = qobject_cast<QVBoxLayout*>(g_infoPage->layout())) {
+        mountBanner(b, v, v->count() - 1);
+        logLine("banner attached to info page");
+    }
 }
 
 void updateInfoStatus();
@@ -1544,8 +2276,8 @@ void updateInfoStatus() {
         return;
     }
     const QString st = g_treeRows->clientStatus(cur);
-    g_infoStatus->setText(st);
-    g_infoStatus->setVisible(!st.isEmpty());
+    if (g_infoStatus->text() != st) g_infoStatus->setText(st);
+    if (g_infoStatus->isHidden() == !st.isEmpty()) g_infoStatus->setVisible(!st.isEmpty());
 }
 
 void wireInfoSelection(QTreeView* tree) {
@@ -1576,7 +2308,7 @@ void layoutPane() {
     // stylesheet and would drop an append done at install time.
     if (qApp && qApp->styleSheet().indexOf(QLatin1String("ServerTreeView { padding-bottom")) < 0) {
         qApp->setStyleSheet(qApp->styleSheet() +
-                            QStringLiteral("\nQTreeView#ServerTreeView { padding-bottom: 64px; }\n"));
+                            QStringLiteral("\nQTreeView#ServerTreeView { padding-bottom: %1px; }\n").arg(h));
     }
     // The tree keeps the full pane height so the card floats over its rows
     // instead of sitting in a reserved strip.
@@ -1788,65 +2520,12 @@ void hideStockToolbar() {
     }
 }
 
-// The stock chat input row ends in an emoticon toggle, which the theme does
-// not replace; hiding it leaves the field as one clean box.
-void hideChatExtras() {
-    for (QWidget* w : QApplication::allWidgets()) {
-        if (!w) continue;
-        if (w->objectName() == QLatin1String("EmoticonButton") &&
-            QString::fromLatin1(w->metaObject()->className()) == "QToolButton") {
-            if (w->isVisible()) w->hide();
-        }
-    }
-}
-
-// The chat pane's layout pins the input to the bottom of its row, so equal QSS
-// margins still leave a bigger gap above the field than below it. Centre it
-// explicitly instead, between the tab bar and the status bar.
-void centerChatInput() {
-    if (!qApp) return;
-    static QPointer<QWidget> host;
-    if (!host) {
-        for (QWidget* w : QApplication::allWidgets()) {
-            if (!w || w->objectName() != QLatin1String("MainWindowChatWidget")) continue;
-            if (!w->findChild<QTextEdit*>(QStringLiteral("ChatLineEdit"), Qt::FindDirectChildrenOnly))
-                continue;
-            host = w;
-            break;
-        }
-        if (!host) return;
-    }
-    auto* edit = host->findChild<QTextEdit*>(QStringLiteral("ChatLineEdit"), Qt::FindDirectChildrenOnly);
-    if (!edit || !edit->isVisible()) return;
-    // The field is the scroll area's child; that container is what the pane's
-    // layout positions, and it forces the field's height.
-    QWidget* box = edit->parentWidget();
-    if (!box) return;
-    QWidget* row = box->parentWidget();
-    if (!row) return;
-    const int h = 34;
-    const int x = 8;
-    const int w = qMax(120, row->width() - 16);
-    // Row includes the tab bar at its top; the usable band runs from the
-    // tab bar's baseline down to the status separator.
-    const int top = 30;
-    const int bottom = row->height() - 22;
-    const int y = qMax(0, top + (qMax(0, bottom - top) - h) / 2);
-    if (box->height() < h) {
-        box->setMinimumHeight(h);
-        box->setMaximumHeight(h);
-    }
-    if (box->geometry() != QRect(x, y, w, h)) box->setGeometry(x, y, w, h);
-    if (edit->height() < h) edit->setMinimumHeight(h);
-}
-
-// Live window resizes arrive between heartbeats. Recompute the ratio split and
-// the hand-positioned pieces immediately so the panes scale with the window
-// instead of snapping once the 1.5s tick lands.
+// The splitter and the native chat layout own the pane and composer bounds.
+// Only synchronize the floating surfaces when the main window resizes.
 void syncMainWindowLayout() {
     pinSplitterSizes();
     layoutPane();
-    centerChatInput();
+    layoutCardHost();
 }
 
 // --------------------------------------------------------------- fast burst
@@ -1884,12 +2563,10 @@ void heartbeat() {
     if (!qApp || !g_guard) return;
     installChannelPanel();
     hideStockToolbar();
-    hideChatExtras();
-    centerChatInput();
     applyWindowBounds();
     QTreeView* tree = findActiveTree();
+    styleTree(tree);
     if (tree) {
-        styleTree(tree);
         installInfoTab();
         attachBannerIfAny();
         wireInfoSelection(tree);
@@ -1930,7 +2607,7 @@ void queueTreeRefresh() {
     QMetaObject::invokeMethod(g_guard, [] {
         queued = false;
         QTreeView* tree = findActiveTree();
-        if (tree) styleTree(tree);
+        styleTree(tree);
         if (g_treeRows) g_treeRows->refresh();
         if (g_styledTree) g_styledTree->viewport()->update();
     }, Qt::QueuedConnection);
@@ -2031,8 +2708,6 @@ extern "C" __declspec(dllexport) int ts3plugin_init() {
     return 0;
 }
 void cleanupUi() {
-
-    if (qApp) restoreLayout();
     if (g_stockToolbar) g_stockToolbar->show();
 
     if (g_stateTimer) { g_stateTimer->stop(); delete g_stateTimer.data(); g_stateTimer = nullptr; }
@@ -2042,6 +2717,8 @@ void cleanupUi() {
         delete g_frameFilter.data();
         g_frameFilter = nullptr;
     }
+    resetWindowFrames();
+    delete g_treeWheelMotion.data();
     delete g_guard.data();
     g_guard = nullptr;
     g_connectionStatus.clear();
@@ -2051,27 +2728,36 @@ void cleanupUi() {
     if (g_infoConn) { QObject::disconnect(g_infoConn); g_infoConn = QMetaObject::Connection(); }
     if (g_chatTabConn) { QObject::disconnect(g_chatTabConn); g_chatTabConn = QMetaObject::Connection(); }
     if (g_chatFilter) {
-        if (g_chatLog) g_chatLog->removeEventFilter(g_chatFilter);
         delete g_chatFilter.data();
         g_chatFilter = nullptr;
     }
     if (g_modernChat) { delete g_modernChat.data(); g_modernChat = nullptr; }
     if (g_notifyToast) { delete g_notifyToast.data(); g_notifyToast = nullptr; }
-    g_chatLog = nullptr;
     g_chatTab = nullptr;
     g_infoShown = false;
 
     if (g_banner && g_bannerHome) {
         g_banner->setParent(g_bannerHome);
-        g_banner->hide();
+        g_banner->setMaximumHeight(g_bannerMaximumHeight);
+        if (auto* box = qobject_cast<QBoxLayout*>(g_bannerHome->layout()); box && g_bannerIndex >= 0)
+            box->insertWidget(g_bannerIndex, g_banner, g_bannerStretch);
+        g_banner->setVisible(g_bannerWasVisible);
     }
     if (g_infoFrame && g_infoHome) {
         g_infoFrame->setParent(g_infoHome);
-        if (g_infoSplitter && g_infoSplitter->indexOf(g_infoFrame) < 0)
-            g_infoSplitter->addWidget(g_infoFrame);
+        if (g_infoSplitter) {
+            g_infoSplitter->insertWidget(g_infoIndex, g_infoFrame);
+        } else if (auto* box = qobject_cast<QBoxLayout*>(g_infoHome->layout()); box && g_infoIndex >= 0) {
+            box->insertWidget(g_infoIndex, g_infoFrame, g_infoStretch, g_infoAlignment);
+        }
         g_infoFrame->show();
     }
-    if (g_infoPage) { delete g_infoPage.data(); g_infoPage = nullptr; }
+    delete g_cardHost.data();
+    g_cardHost = nullptr;
+    if (qApp) {
+        restoreLayout();
+        restoreContentHost();
+    }
 
     for (auto it = g_oldDelegates.begin(); it != g_oldDelegates.end(); ++it) {
         if (it.key() && it.value()) it.key()->setItemDelegate(it.value());
@@ -2397,7 +3083,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
         const QString line = text.isEmpty()
                                  ? QStringLiteral("%1 戳了戳你").arg(shown)
                                  : QStringLiteral("%1 戳了戳你：%2").arg(shown, text);
-        appendSystemMessage(serverConnectionHandlerID, line, 2);
+        appendSystemMessage(serverConnectionHandlerID, line, 0, true);
         showPokeToast(serverConnectionHandlerID, name, text);
         if (g_modernChat && g_modernChat->isVisible() && !g_overlayKey.isEmpty() &&
             g_overlayKey != serverKey(serverConnectionHandlerID)) {
@@ -2405,7 +3091,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
             msg.text = line;
             msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
             msg.system = true;
-            msg.severity = 2;
+            msg.poke = true;
             g_chatHistory[g_overlayKey].append(msg);
             g_modernChat->addMessage(msg);
         }
