@@ -129,43 +129,55 @@ void drawMic(QPainter& p, const QRectF& r, const QColor& color, bool muted) {
     p.restore();
 }
 
-// Flat muted speaker: just the cone plus one diagonal slash through it.
-void drawSpeakerMutedBadge(QPainter& p, const QRectF& r, const QColor& color) {
-    p.save();
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(QPen(color, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.setBrush(Qt::NoBrush);
-    QPainterPath body;
-    const qreal cy = r.center().y();
-    body.moveTo(r.left() + 2.2, cy - 2.4);
-    body.lineTo(r.left() + 4.8, cy - 2.4);
-    body.lineTo(r.left() + 8.4, r.top() + 2.6);
-    body.lineTo(r.left() + 8.4, r.bottom() - 2.6);
-    body.lineTo(r.left() + 4.8, cy + 2.4);
-    body.lineTo(r.left() + 2.2, cy + 2.4);
-    body.closeSubpath();
-    p.drawPath(body);
-    p.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap));
-    p.drawLine(QPointF(r.left() + 1.5, r.bottom() - 2),
-               QPointF(r.right() - 1.5, r.top() + 2));
-    p.restore();
+enum class MutedAudio { Microphone, Speaker };
+constexpr int kAudioBadgeSize = 16;
+constexpr int kAudioBadgeGap = 1;
+
+QPainterPath mutedAudioShape(MutedAudio audio) {
+    QPainterPath glyph;
+    if (audio == MutedAudio::Microphone) {
+        glyph.addRoundedRect(QRectF(6.1, 3.0, 3.8, 6.0), 1.9, 1.9);
+        glyph.moveTo(4.5, 7.5);
+        glyph.cubicTo(4.5, 9.5, 5.9, 10.9, 8.0, 10.9);
+        glyph.cubicTo(10.1, 10.9, 11.5, 9.5, 11.5, 7.5);
+        glyph.moveTo(8.0, 10.9);
+        glyph.lineTo(8.0, 13.0);
+    } else {
+        glyph.moveTo(3.1, 6.2);
+        glyph.lineTo(5.6, 6.2);
+        glyph.lineTo(8.9, 3.7);
+        glyph.lineTo(8.9, 12.3);
+        glyph.lineTo(5.6, 9.8);
+        glyph.lineTo(3.1, 9.8);
+        glyph.closeSubpath();
+        glyph.moveTo(11.0, 5.7);
+        glyph.quadTo(13.5, 8.0, 11.0, 10.3);
+    }
+
+    QPainterPath slash(QPointF(3.0, 3.0));
+    slash.lineTo(13.0, 13.0);
+    QPainterPathStroker stroke;
+    stroke.setCapStyle(Qt::RoundCap);
+    stroke.setJoinStyle(Qt::RoundJoin);
+    stroke.setWidth(1.4);
+    const QPainterPath outline = stroke.createStroke(glyph);
+    const QPainterPath muteMark = stroke.createStroke(slash);
+    // Cut the gap out of the icon so the row shows through in every state.
+    stroke.setWidth(2.9);
+    QPainterPath silhouette = outline.subtracted(stroke.createStroke(slash));
+    silhouette.addPath(muteMark);
+    return silhouette;
 }
 
-// Small per-member state badges. Kept compact (12-14px) so they read as
-// secondary information next to the name.
-void drawMicBadge(QPainter& p, const QRectF& r, const QColor& color) {
+void drawMutedAudioBadge(QPainter& p, const QPointF& topLeft, MutedAudio audio) {
+    static const QPainterPath micShape = mutedAudioShape(MutedAudio::Microphone);
+    static const QPainterPath speakerShape = mutedAudioShape(MutedAudio::Speaker);
+    const QColor ink = discord::isDark() ? QColor(0xFF, 0x75, 0x78) : QColor(0xC6, 0x32, 0x36);
+
     p.save();
+    p.translate(topLeft);
     p.setRenderHint(QPainter::Antialiasing, true);
-    const qreal cx = r.center().x();
-    QPen pen(color, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-    p.setPen(pen);
-    p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(QRectF(cx - 1.9, r.top() + 2.2, 3.8, 6.2), 1.9, 1.9);
-    p.drawArc(QRectF(cx - 4.2, r.top() + 4.4, 8.4, 6.6), 0, -180 * 16);
-    p.drawLine(QPointF(cx, r.top() + 11), QPointF(cx, r.bottom() - 1.4));
-    p.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap));
-    p.drawLine(QPointF(r.left() + 1.5, r.bottom() - 2),
-               QPointF(r.right() - 1.5, r.top() + 2));
+    p.fillPath(audio == MutedAudio::Microphone ? micShape : speakerShape, ink);
     p.restore();
 }
 
@@ -181,6 +193,28 @@ void drawAwayBadge(QPainter& p, const QRectF& r, const QColor& color) {
     i.addEllipse(outer.translated(outer.width() * 0.42, -outer.height() * 0.2));
     p.fillPath(o.subtracted(i), color);
     p.restore();
+}
+
+// Pack the member badges from the right edge and return the text boundary.
+int drawMemberBadges(QPainter& p, const QRect& row, bool inputMuted, bool outputMuted, bool away) {
+    const qreal centerY = row.y() + row.height() / 2.0;
+    const qreal top = centerY - kAudioBadgeSize / 2.0;
+    int x = row.x() + row.width() - 12;
+    if (outputMuted) {
+        x -= kAudioBadgeSize;
+        drawMutedAudioBadge(p, QPointF(x, top), MutedAudio::Speaker);
+        x -= kAudioBadgeGap;
+    }
+    if (inputMuted) {
+        x -= kAudioBadgeSize;
+        drawMutedAudioBadge(p, QPointF(x, top), MutedAudio::Microphone);
+        x -= kAudioBadgeGap;
+    }
+    if (away) {
+        x -= 18;
+        drawAwayBadge(p, QRectF(x, centerY - 7.5, 18, 15), discord::awayColor());
+    }
+    return x - 4;
 }
 
 // Outline crescent for the user-panel toggle, same stroke weight as the mic and
@@ -536,24 +570,11 @@ void ChannelSidebar::paintEvent(QPaintEvent*) {
         const QFontMetrics fm(rowFont);
         const int left = indent + 30;
 
-        // State cluster, right aligned: headset mute, mic mute, away (Zz).
-        const QColor off = discord::danger();
-        int bx = width() - 12;
-        if (row.outputMuted) {
-            bx -= 15;
-            drawSpeakerMutedBadge(p, QRectF(bx, r.center().y() - 7, 14, 14), off);
+        const int textRight = drawMemberBadges(p, r, row.inputMuted, row.outputMuted, row.away);
+        if (textRight > left) {
+            p.drawText(QRect(left, row.y, textRight - left, h), Qt::AlignLeft | Qt::AlignVCenter,
+                       fm.elidedText(row.text, Qt::ElideRight, textRight - left));
         }
-        if (row.inputMuted) {
-            bx -= 15;
-            drawMicBadge(p, QRectF(bx, r.center().y() - 7, 14, 14), off);
-        }
-        if (row.away) {
-            bx -= 19;
-            drawAwayBadge(p, QRectF(bx, r.center().y() - 7, 18, 15), discord::awayColor());
-        }
-        const int textRight = qMax(left + 24, bx - 4);
-        p.drawText(QRect(left, row.y, textRight - left, h), Qt::AlignLeft | Qt::AlignVCenter,
-                   fm.elidedText(row.text, Qt::ElideRight, textRight - left));
     }
 }
 
@@ -1323,21 +1344,11 @@ void NativeTreeRows::paint(QPainter* p, const QStyleOptionViewItem& option,
     p->setPen(away ? discord::muted() : discord::ink());
     const int left = r.left() + 27;
 
-    const QColor off = discord::danger();
-    int bx = r.right() - 10;
-    if (outMuted) {
-        bx -= 15;
-        drawSpeakerMutedBadge(*p, QRectF(bx, r.center().y() - 7, 14, 14), off);
+    const int textRight = drawMemberBadges(*p, r, muted, outMuted, away);
+    if (textRight <= left) {
+        p->restore();
+        return;
     }
-    if (muted) {
-        bx -= 15;
-        drawMicBadge(*p, QRectF(bx, r.center().y() - 7, 14, 14), off);
-    }
-    if (away) {
-        bx -= 19;
-        drawAwayBadge(*p, QRectF(bx, r.center().y() - 7, 18, 15), discord::awayColor());
-    }
-    const int textRight = qMax(left + 24, bx - 4);
 
     // Draw leading [group] tags bold, then the nickname in the normal weight.
     int x = left;
