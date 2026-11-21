@@ -5,6 +5,10 @@ setlocal
 set "ROOT=%~dp0.."
 if not defined QTDIR set "QTDIR=C:\Qt\5.15.2\msvc2019_64"
 if not defined VCVARS set "VCVARS=C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+REM Version comes from tools/release_meta.py (release.py passes it as %1), so
+REM bumping the release no longer needs a source edit.
+if not defined PLUGIN_VERSION set "PLUGIN_VERSION=%~1"
+if not defined PLUGIN_VERSION set "PLUGIN_VERSION=0.0.0"
 
 if defined MSVC_ROOT goto standalone_msvc
 if not exist "%VCVARS%" (
@@ -47,6 +51,7 @@ if not exist "%QTDIR%\lib\Qt5Widgets.lib" (
 if not exist "%ROOT%\build" mkdir "%ROOT%\build"
 
 cl /nologo /LD /EHsc /O2 /std:c++17 /MD /W3 /utf-8 ^
+  /DPLUGIN_VERSION=\"%PLUGIN_VERSION%\" ^
   /I"%QTDIR%\include" ^
   /I"%QTDIR%\include\QtCore" ^
   /I"%QTDIR%\include\QtGui" ^

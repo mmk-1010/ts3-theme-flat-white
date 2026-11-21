@@ -658,7 +658,8 @@ QTextEdit#ChatLineEdit {
 
 QTextEdit#ChatLineEdit:focus {
 	background-color: ${bgInputFocus};
-	border-color: ${focus};
+	border-color: ${strokeControl};
+	border-bottom-color: ${strokeHover};
 }
 
 QTextEdit#ChatLineEdit[helpTextVisible="true"] {

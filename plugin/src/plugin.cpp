@@ -2664,7 +2664,11 @@ extern "C" __declspec(dllexport) const char* ts3plugin_name() {
     return "Flat White UI";
 }
 extern "C" __declspec(dllexport) const char* ts3plugin_version() {
-    return "1.6.0";
+    // Injected by tools/build.bat so a release only has to bump release_meta.py.
+#ifndef PLUGIN_VERSION
+#define PLUGIN_VERSION "0.0.0"
+#endif
+    return PLUGIN_VERSION;
 }
 extern "C" __declspec(dllexport) int ts3plugin_apiVersion() {
     return 26;

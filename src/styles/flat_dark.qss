@@ -658,7 +658,8 @@ QTextEdit#ChatLineEdit {
 
 QTextEdit#ChatLineEdit:focus {
 	background-color: #2D2D2D;
-	border-color: #2DD4BF;
+	border-color: #575757;
+	border-bottom-color: #838383;
 }
 
 QTextEdit#ChatLineEdit[helpTextVisible="true"] {
