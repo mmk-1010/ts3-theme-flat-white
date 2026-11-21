@@ -1,4 +1,4 @@
-# Flat White · Flat Dark — TeamSpeak 3 主题包
+# Flat White · Flat Dark — TeamSpeak 3 主题
 
 **简体中文** | [English](README.en.md)
 
@@ -6,66 +6,45 @@
 
 ## 风格
 
-浅色与深色两套主题，共用同一套扁平语言：无渐变、无高光、无阴影，层次只靠 1px 发丝线、
-圆角和单一青绿强调色建立。控件圆角 6px、面板 8px，行高 22px，字体统一为
-Microsoft YaHei UI 9pt，中英混排不跳行高。
+无渐变、无高光、无阴影。层次只靠 1px 发丝线、圆角和一种青绿强调色区分。
+控件圆角 4px、面板 8px，正文 14px，字体统一 Microsoft YaHei UI，中英混排不跳行高。
 
-- **Flat White（浅色）**：窗口底 `#F7F8FA`，面板纯白；正文 `#1F2328`，强调色 `#0F766E`。
-- **Flat Dark（深色）**：窗口底 `#141519`，面板 `#1B1D22`；正文 `#E7E9EC`，强调色 `#2DD4BF`。
-  装配套插件后，Windows 标题栏、窗口边框和对话框也会一起变暗，而不只是客户区。
+- **Flat White**：底色 `#F2F2F2`，面板 `#FAFAFA`，正文 `#252525`，强调色 `#0B7068`。
+- **Flat Dark**：底色 `#1B1B1B`，面板 `#232323`，正文 `#F2F2F2`，强调色 `#2DD4BF`。
+  装上插件后，Windows 标题栏和窗口边框也会一起变暗。
 
-配套两套线性图标，以及一个把界面重排为 Discord 式「内容优先」布局的插件；
-另有 78 个合成音效，可选独立安装。所有素材自行绘制／合成，不含第三方图片或音频。
+两套主题配两套线性图标，另有一个插件：把界面重排成 Discord 那样的内容优先布局，
+聊天改成气泡，带消息与戳一戳提醒、悬浮用户卡片，窗口可自由缩放。
 
 ## 下载
 
-到 [最新发布](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) 页面选择对应的 ZIP 压缩包：
+到[最新发布](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest)页面下载：
 
-| 压缩包 | 内容 |
-| --- | --- |
-| [Flat White](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) | 浅色主题 + 浅色图标 + 插件 |
-| [Flat Dark](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest) | 深色主题 + 深色图标 + 插件 |
+- **浅色**：选 Flat White 包
+- **深色**：选 Flat Dark 包
 
-两个包的插件功能相同；深色包内的文件统一使用 Flat Dark 名称。插件负责
-Discord 式布局、气泡聊天、消息与戳一戳提醒、悬浮用户卡片、深色标题栏和自由缩放窗口。
-系统事件与错误日志支持选择复制，自身的离开、麦克风及耳机静音状态会同步到用户面板、成员行和资料页。
-主题、图标包和插件也可以单独下载。
-
-**可选音效**：78 个合成音效，可独立下载安装
+两个包都含主题、图标和插件，插件是同一个，装哪个都一样。
+音效是可选的，单独下载
 [Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White-Sounds.ts3_soundpack) 或
-[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark-Sounds.ts3_soundpack)，两者音效内容相同。
-
-提醒音效会优先使用已经安装的 Flat White Sounds / Flat Dark Sounds 提示音，否则回退到
-客户端默认音效包；面板里的离开 / 麦克风 / 耳机按钮不依赖音效包。
+[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark-Sounds.ts3_soundpack)，内容相同。
 
 ## 安装
 
-解压后按顺序双击安装包，每步装完重启客户端：
+按顺序双击，每步装完重启客户端：
 
-1. **主题**：双击 `Flat White.ts3_style` 或 `Flat Dark.ts3_style`（两个都装也可以），
-   重启后在 **工具 → 选项 → 设计 → 主题** 选 `flat_white`（浅色）或 `flat_dark`（深色）。
-2. **图标包**：双击配套的 `.ts3_iconpack`，重启后在 **工具 → 选项 → 设计 → 图标包**
-   选 *Flat White Icons*（浅色）或 *Flat Dark Icons*（深色）。
-3. **插件**：先完全退出 TS3，双击对应包里的 `.ts3_plugin`（深色包为
-   `Flat Dark UI.ts3_plugin`）；再次启动后到 **工具 → 选项 → 插件** 确认
-   *Flat White UI* 已勾选（深浅两包共用同一个插件，不会重复加载）。
-4. **音效（可选，独立安装）**：双击单独下载的 `.ts3_soundpack` 按提示安装
-   （客户端装在 Program Files 下需要管理员权限），
-   重启后在 **工具 → 选项 → 通知 → 音效包** 选 *Flat White Sounds*（浅色）或
-   *Flat Dark Sounds*（深色）。
+1. **主题**：双击 `.ts3_style`，重启后在 **工具 → 选项 → 设计 → 主题** 选 `flat_white` 或 `flat_dark`。
+2. **图标包**：双击 `.ts3_iconpack`，重启后在 **设计 → 图标包** 选对应图标包。
+3. **插件**：先完全退出 TS3，双击 `.ts3_plugin`，再启动后在 **工具 → 选项 → 插件** 确认已勾选。
+4. **音效**（可选）：双击下载的 `.ts3_soundpack`，重启后在 **工具 → 选项 → 通知 → 音效包** 选择。
 
-主题、图标包、插件和音效都可以不装，只装主题也能完成换肤。深色主题不装插件时只有客户区变暗，
-窗口标题栏仍由系统绘制；装上插件后标题栏、边框和自绘控件会一起变深。
+只装主题也能换肤。深色主题不装插件时只有客户区变暗，标题栏仍归系统绘制。
 
 ## 卸载
 
-- 主题、图标包：**选项 → 设计** 里切回默认，或删掉客户端目录（主题）与
-  `%APPDATA%\TS3Client\gfx`（图标包）里的对应条目。
-- 插件：删除 `%APPDATA%\TS3Client\plugins\flatwhite_ui_win64.dll`。
-- 音效：删除 `<客户端目录>\sound\flatwhite`，以及安装包生成的
-  `sound\Flat White Sounds` / `sound\Flat Dark Sounds`。
+主题和图标包在 **选项 → 设计** 里切回默认；插件删
+`%APPDATA%\TS3Client\plugins\flatwhite_ui_win64.dll`；音效删客户端目录 `sound\` 下对应的文件夹。
 
 ## 兼容性
 
-TeamSpeak 3 **3.6.2**（Windows x64，Qt 5.15.2）实测通过。插件仅提供 win64 版本；
-主题与图标包为纯资源，各平台通用但未在 macOS / Linux 上实测。
+TeamSpeak 3 3.6.2（Windows x64，Qt 5.15.2）实测通过。插件只有 win64 版本，
+主题和图标包是纯资源，各平台通用但没在 macOS / Linux 上实测。
