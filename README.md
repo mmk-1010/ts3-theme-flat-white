@@ -25,8 +25,8 @@
 
 两个包都含主题、图标和插件，插件是同一个，装哪个都一样。
 音效是可选的，单独下载
-[Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White-Sounds.ts3_soundpack) 或
-[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark-Sounds.ts3_soundpack)，内容相同。
+[Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/download/v1.6/Flat-White-Sounds.ts3_soundpack) 或
+[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/download/v1.6/Flat-Dark-Sounds.ts3_soundpack)，内容相同。
 
 ## 安装
 

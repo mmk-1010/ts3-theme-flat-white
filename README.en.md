@@ -29,8 +29,8 @@ Grab the archive you want from the
 
 Both contain the theme, the icons and the plugin — it is the same plugin either way.
 Sounds are optional and downloaded separately as
-[Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-White-Sounds.ts3_soundpack) or
-[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/latest/download/Flat-Dark-Sounds.ts3_soundpack); both hold the same sounds.
+[Flat White Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/download/v1.6/Flat-White-Sounds.ts3_soundpack) or
+[Flat Dark Sounds](https://github.com/mmk-1010/ts3-theme-flat-white/releases/download/v1.6/Flat-Dark-Sounds.ts3_soundpack); both hold the same sounds.
 
 ## Installation
 
