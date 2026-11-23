@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "foundation_motion.h"
+#include "teamspeak/public_errors.h"
 
 namespace {
 
@@ -730,8 +731,12 @@ void UserPanel::updatePointerVisuals(qreal progress) {
     if (!dirty.isEmpty()) update(dirty);
 }
 
+bool UserPanel::awayPresetVisible() const {
+    return m_awayPresets.contains(m_server) || (!m_connected && m_awayPresets.contains(0));
+}
+
 bool UserPanel::buttonActive(int index) const {
-    if (index == 0) return m_away;
+    if (index == 0) return m_away || awayPresetVisible();
     if (index == 1) return m_inputMuted;
     return m_outputMuted;
 }
@@ -769,13 +774,73 @@ void UserPanel::setSelfState(quint64 server, unsigned short client, int flag, bo
     update();
 }
 
+int UserPanel::connectionStatus(quint64 server) const {
+    int status = STATUS_DISCONNECTED;
+    if (server && m_funcs.getConnectionStatus &&
+        m_funcs.getConnectionStatus(server, &status) == ERROR_ok) return status;
+    return STATUS_DISCONNECTED;
+}
+
+unsigned short UserPanel::selfId(quint64 server) const {
+    unsigned short self = 0;
+    if (server && m_funcs.getClientID && m_funcs.getClientID(server, &self) == ERROR_ok) return self;
+    return 0;
+}
+
+bool UserPanel::writeSelfState(quint64 server, int flag, int value, int previous) {
+    if (!m_funcs.setClientSelfVariableAsInt || !m_funcs.flushClientSelfUpdates) return false;
+    unsigned int error = m_funcs.setClientSelfVariableAsInt(server, flag, value);
+    if (error == ERROR_ok) {
+        char returnCode[128] = {};
+        if (!m_pluginId.isEmpty() && m_funcs.createReturnCode)
+            m_funcs.createReturnCode(m_pluginId.constData(), returnCode, sizeof(returnCode));
+        error = m_funcs.flushClientSelfUpdates(server, returnCode[0] ? returnCode : nullptr);
+        // The setter stages a value locally; discard it if sending failed.
+        if (error != ERROR_ok) m_funcs.setClientSelfVariableAsInt(server, flag, previous);
+    }
+    if (error == ERROR_ok) return true;
+    if (m_error) m_error(server, flag, error);
+    return false;
+}
+
+void UserPanel::publishSelfState(quint64 server, unsigned short self, int flag, bool value) {
+    if (m_server == server && m_self == self) setSelfState(server, self, flag, value, true);
+    if (m_stateChange) m_stateChange(server, self, flag, value);
+}
+
+void UserPanel::applyAwayPreset(quint64 server) {
+    if (!server || (!m_awayPresets.contains(server) && !m_awayPresets.contains(0))) return;
+    if (connectionStatus(server) != STATUS_CONNECTION_ESTABLISHED) return;
+    // Once the next connection is known, keep a failed preset on that tab.
+    m_awayPresets.remove(0);
+    m_awayPresets.insert(server);
+    refresh();
+    const unsigned short self = selfId(server);
+    if (!self) return;
+
+    int away = AWAY_NONE;
+    const bool alreadyAway = m_funcs.getClientVariableAsInt &&
+        m_funcs.getClientVariableAsInt(server, self, CLIENT_AWAY, &away) == ERROR_ok && away != AWAY_NONE;
+    if (!alreadyAway && !writeSelfState(server, CLIENT_AWAY, AWAY_ZZZ, AWAY_NONE)) return;
+    m_awayPresets.remove(server);
+    publishSelfState(server, self, CLIENT_AWAY, true);
+    update();
+}
+
 void UserPanel::refresh() {
     if (!m_funcs.getCurrentServerConnectionHandlerID) return;
     const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
-    if (!h) return;
-
-    unsigned short self = 0;
-    if (m_funcs.getClientID && m_funcs.getClientID(h, &self) == 0) {
+    const bool connected = connectionStatus(h) == STATUS_CONNECTION_ESTABLISHED;
+    const unsigned short self = connected ? selfId(h) : 0;
+    if (h != m_server || self != m_self) {
+        m_name.clear();
+        m_away = m_inputMuted = m_outputMuted = false;
+        m_selfChanges.bind(h, self);
+    }
+    m_server = h;
+    m_self = self;
+    m_connected = connected;
+    if (self) {
         if (m_funcs.getClientDisplayName) {
             char buf[128] = {0};
             if (m_funcs.getClientDisplayName(h, self, buf, sizeof(buf) - 1) == 0) {
@@ -849,8 +914,9 @@ void UserPanel::paintEvent(QPaintEvent*) {
                    nameMetrics.elidedText(displayName, Qt::ElideRight, textWidth));
 
         QString state = QStringLiteral("在线");
-        if (m_name.isEmpty()) state = QStringLiteral("离线");
-        else if (m_away) state = QStringLiteral("离开");
+        if (m_away) state = QStringLiteral("离开");
+        else if (awayPresetVisible()) state = QStringLiteral("预设离开");
+        else if (!m_connected) state = QStringLiteral("离线");
         else if (m_outputMuted) state = QStringLiteral("耳机静音");
         else if (m_inputMuted) state = QStringLiteral("麦克风静音");
         p.setFont(stateFont);
@@ -898,36 +964,31 @@ void UserPanel::mousePressEvent(QMouseEvent* e) {
     const int button = buttonAt(e->pos());
     setPointerState(button, button);
     if (button < 0) return;
-    if (!m_funcs.getCurrentServerConnectionHandlerID || !m_funcs.setClientSelfVariableAsInt ||
-        !m_funcs.flushClientSelfUpdates || !m_funcs.getClientID) return;
-    const quint64 h = m_funcs.getCurrentServerConnectionHandlerID();
-    unsigned short self = 0;
-    if (!h || m_funcs.getClientID(h, &self) != 0 || !self) return;
     // Refresh first in case this click follows a server switch.
     refresh();
+    if (button == 0) {
+        if (awayPresetVisible() && !m_away) {
+            m_awayPresets.remove(m_server);
+            if (!m_connected) m_awayPresets.remove(0);
+            update();
+            return;
+        }
+        if (!m_connected || !m_self) {
+            m_awayPresets.insert(m_server);
+            update();
+            return;
+        }
+    }
+    if (!m_self) return;
     const int flag = button == 0 ? CLIENT_AWAY
                                  : (button == 1 ? CLIENT_INPUT_MUTED : CLIENT_OUTPUT_MUTED);
-    const bool value = !buttonActive(button);
+    const bool active = button == 0 ? m_away : buttonActive(button);
     const int enabled = button == 0 ? AWAY_ZZZ
                                      : (button == 1 ? MUTEINPUT_MUTED : MUTEOUTPUT_MUTED);
-    const int target = value ? enabled : 0;
-    unsigned int error = m_funcs.setClientSelfVariableAsInt(h, flag, target);
-    if (error != 0) {
-        if (m_error) m_error(h, flag, error);
-        return;
+    if (writeSelfState(m_server, flag, active ? 0 : enabled, active ? enabled : 0)) {
+        if (button == 0) m_awayPresets.remove(m_server);
+        publishSelfState(m_server, m_self, flag, !active);
     }
-    char returnCode[128] = {};
-    if (!m_pluginId.isEmpty() && m_funcs.createReturnCode)
-        m_funcs.createReturnCode(m_pluginId.constData(), returnCode, sizeof(returnCode));
-    error = m_funcs.flushClientSelfUpdates(h, returnCode[0] ? returnCode : nullptr);
-    if (error != 0) {
-        // The setter stages a value locally; discard it if sending failed.
-        m_funcs.setClientSelfVariableAsInt(h, flag, buttonActive(button) ? enabled : 0);
-        if (m_error) m_error(h, flag, error);
-        return;
-    }
-    setSelfState(h, self, flag, value, true);
-    if (m_stateChange) m_stateChange(h, self, flag, value);
 }
 
 void UserPanel::mouseReleaseEvent(QMouseEvent* e) {
@@ -968,10 +1029,12 @@ bool UserPanel::event(QEvent* e) {
         }
         static const char* const onText[] = {"设为离开", "静音麦克风", "静音耳机"};
         static const char* const offText[] = {"取消离开", "取消麦克风静音", "取消耳机静音"};
-        QToolTip::showText(help->globalPos(),
-                           QString::fromUtf8(buttonActive(button) ? offText[button]
-                                                                  : onText[button]),
-                           this);
+        const char* text = buttonActive(button) ? offText[button] : onText[button];
+        if (button == 0) {
+            if (awayPresetVisible() && !m_away) text = "取消预设离开";
+            else if (!m_connected || !m_self) text = "连接后设为离开";
+        }
+        QToolTip::showText(help->globalPos(), QString::fromUtf8(text), this);
         return true;
     }
     return QWidget::event(e);

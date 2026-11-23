@@ -2849,6 +2849,10 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
         default: break;
         }
         if (!text.isEmpty()) appendSystemMessage(serverConnectionHandlerID, text, severity);
+        if (g_userPanel) {
+            if (status == STATUS_CONNECTION_ESTABLISHED) g_userPanel->applyAwayPreset(serverConnectionHandlerID);
+            g_userPanel->refresh();
+        }
     }, Qt::QueuedConnection);
     // A reconnect rebuilds the panes from scratch, so the stock widgets are
     // painted again; catch the new tree within a couple of frames.
