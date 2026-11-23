@@ -323,6 +323,7 @@ public:
     // text; used by the bubble delegate to paint the highlight.
     bool selectionRangeForRow(int row, int& start, int& end) const;
     QString rowPlainText(int row) const;
+    bool showsKeyboardCursor() const { return m_keyboardNavigation; }
 
 protected:
     void paintEvent(QPaintEvent* ev) override;
@@ -330,6 +331,7 @@ protected:
     void showEvent(QShowEvent* ev) override;
     void hideEvent(QHideEvent* ev) override;
     void wheelEvent(QWheelEvent* ev) override;
+    void focusInEvent(QFocusEvent* ev) override;
     void mousePressEvent(QMouseEvent* ev) override;
     void mouseMoveEvent(QMouseEvent* ev) override;
     void mouseReleaseEvent(QMouseEvent* ev) override;
@@ -350,6 +352,8 @@ private:
     void copyRow(int row);
     void copyAll();
     void insertMessage(const ChatMessage& msg);
+    void focusVisibleRow();
+    void setReadingRow(int row);
     void restoreScrollPosition();
     void rememberScrollPosition(int value);
     void stopWheelScroll();
@@ -359,6 +363,7 @@ private:
     int m_selCursorRow = -1;
     int m_selCursorPos = 0;
     bool m_selecting = false;
+    bool m_keyboardNavigation = false;
     // True while the reader is at the bottom; the scrollbar's rangeChanged
     // handler uses it to keep the newest row in view after a rebuild.
     bool m_followBottom = false;

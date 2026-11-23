@@ -1566,7 +1566,6 @@ struct ChatTextGeom {
 
 ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth,
                            const QPaintDevice* device,
-                           QTextOption::WrapMode wrapMode = QTextOption::WordWrap,
                            Qt::Alignment alignment = Qt::AlignLeft) {
     ChatTextGeom g;
     g.text = text;
@@ -1584,7 +1583,7 @@ ChatTextGeom buildChatText(const QString& text, const QFont& font, int wrapWidth
         para.top = top;
         para.layout.reset(new QTextLayout(text.mid(start, len), font, device));
         QTextOption opt;
-        opt.setWrapMode(wrapMode);
+        opt.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
         opt.setAlignment(alignment);
         para.layout->setTextOption(opt);
         para.layout->beginLayout();
@@ -1689,8 +1688,7 @@ ChatRowGeom buildChatRow(int width, const QModelIndex& index, const QPaintDevice
         constexpr int verticalInsets = 12;
         const int innerWidth = qMax(1, width - 2 * sideInset);
         g.textGeom = buildChatText(sender.isEmpty() ? text : sender + QStringLiteral("  ") + text,
-                                   chatTimeFont(), innerWidth, device,
-                                   QTextOption::WrapAtWordBoundaryOrAnywhere, Qt::AlignHCenter);
+                                   chatTimeFont(), innerWidth, device, Qt::AlignHCenter);
         g.height = qMax(minimumHeight, g.textGeom.height + verticalInsets);
         g.textRect = QRect(sideInset, g.height - bottomInset - g.textGeom.height,
                            innerWidth, g.textGeom.height);
@@ -1761,6 +1759,13 @@ public:
         if (!row.valid) {
             p->restore();
             return;
+        }
+
+        if (option.state.testFlag(QStyle::State_HasFocus) && m_view->showsKeyboardCursor()) {
+            p->setPen(QPen(discord::color(Color::focus), 2));
+            p->setBrush(Qt::NoBrush);
+            p->drawRoundedRect(r.adjusted(2, 1, -2, -1), foundation::radiusControl,
+                               foundation::radiusControl);
         }
 
         int selA = 0;
@@ -1834,8 +1839,10 @@ private:
 ModernChat::ModernChat(QWidget* parent) : QListWidget(parent) {
     setItemDelegate(new ChatBubbleDelegate(this));
     setFrameShape(QFrame::NoFrame);
-    setSelectionMode(QAbstractItemView::NoSelection);
-    setFocusPolicy(Qt::ClickFocus);
+    setSelectionMode(QAbstractItemView::NoSelection); // Text ranges, not whole-item selection.
+    setAccessibleName(QStringLiteral("聊天记录"));
+    setFocusPolicy(Qt::StrongFocus);
+    setTabKeyNavigation(false); // Tab leaves the log; arrows move between messages.
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* sb = new ChatScrollBar(this);
     setVerticalScrollBar(sb);
@@ -1940,7 +1947,7 @@ void ModernChat::hideEvent(QHideEvent* ev) {
 }
 
 void ModernChat::insertMessage(const ChatMessage& msg) {
-    auto* item = new QListWidgetItem(this);
+    auto* item = new QListWidgetItem;
     item->setData(ChatSender, msg.sender);
     item->setData(ChatText, msg.text);
     item->setData(ChatTime, msg.time);
@@ -1948,7 +1955,18 @@ void ModernChat::insertMessage(const ChatMessage& msg) {
     item->setData(ChatSystem, msg.system);
     item->setData(ChatSeverity, msg.severity);
     item->setData(ChatPoke, msg.poke);
-    item->setFlags(Qt::NoItemFlags);
+    const QString sender = msg.self && !msg.system ? QStringLiteral("我") : msg.sender;
+    QStringList spoken;
+    if (!msg.time.isEmpty()) spoken << msg.time;
+    if (msg.system) {
+        spoken << (msg.poke ? QStringLiteral("戳一戳") : msg.severity >= 2 ? QStringLiteral("错误")
+                  : msg.severity == 1 ? QStringLiteral("警告") : QStringLiteral("系统消息"));
+    }
+    if (!sender.isEmpty()) spoken << sender;
+    spoken << msg.text;
+    item->setData(Qt::AccessibleTextRole, spoken.join(QStringLiteral("  ")));
+    item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+    addItem(item); // Publish the complete row, including its accessible name.
 }
 
 void ModernChat::addMessage(const ChatMessage& msg) {
@@ -2104,7 +2122,31 @@ void ModernChat::selectTo(const TextPos& p) {
     viewport()->update();
 }
 
+void ModernChat::setReadingRow(int row) {
+    if (row < 0 || row == currentRow()) return;
+    // Updating the accessibility cursor must not move the text underneath a
+    // mouse press or scroll a partially visible row when tabbing into the log.
+    const bool autoScroll = hasAutoScroll();
+    setAutoScroll(false);
+    setCurrentRow(row, QItemSelectionModel::NoUpdate);
+    setAutoScroll(autoScroll);
+}
+
+void ModernChat::focusVisibleRow() {
+    if (currentItem() && viewport()->rect().intersects(visualItemRect(currentItem()))) return;
+    const QModelIndex first = indexAt(QPoint(viewport()->width() / 2, 0));
+    setReadingRow(m_followBottom ? count() - 1 : first.row());
+}
+
+void ModernChat::focusInEvent(QFocusEvent* ev) {
+    m_keyboardNavigation = ev->reason() == Qt::TabFocusReason || ev->reason() == Qt::BacktabFocusReason
+                          || ev->reason() == Qt::ShortcutFocusReason;
+    if (m_keyboardNavigation) focusVisibleRow();
+    QListWidget::focusInEvent(ev);
+}
+
 void ModernChat::mousePressEvent(QMouseEvent* ev) {
+    m_keyboardNavigation = false;
     if (ev->button() != Qt::LeftButton) {
         QListWidget::mousePressEvent(ev);
         return;
@@ -2113,6 +2155,7 @@ void ModernChat::mousePressEvent(QMouseEvent* ev) {
     setFocus(Qt::MouseFocusReason);
     m_selecting = true;
     const TextPos p = positionAt(ev->pos());
+    setReadingRow(indexAt(ev->pos()).row());
     m_selAnchorRow = m_selCursorRow = p.row;
     m_selAnchorPos = m_selCursorPos = p.pos;
     viewport()->update();
@@ -2173,7 +2216,10 @@ void ModernChat::keyPressEvent(QKeyEvent* ev) {
     const bool ctrlInsert =
         (ev->key() == Qt::Key_Insert) && (ev->modifiers() & Qt::ControlModifier);
     if (ev->matches(QKeySequence::Copy) || ctrlInsert) {
-        copySelection();
+        const bool hasRange = m_selAnchorRow >= 0 && m_selCursorRow >= 0 &&
+            (m_selAnchorRow != m_selCursorRow || m_selAnchorPos != m_selCursorPos);
+        if (!hasRange && m_keyboardNavigation) copyRow(currentRow());
+        else copySelection();
         ev->accept();
         return;
     }
@@ -2188,6 +2234,19 @@ void ModernChat::keyPressEvent(QKeyEvent* ev) {
         return;
     }
     stopWheelScroll();
+    switch (ev->key()) {
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_PageUp:
+    case Qt::Key_PageDown:
+        if (!m_keyboardNavigation) focusVisibleRow();
+        m_keyboardNavigation = true;
+        clearTextSelection();
+        viewport()->update(); // Also show the cursor when already at a boundary.
+        break;
+    }
     QListWidget::keyPressEvent(ev);
 }
 
@@ -2195,7 +2254,7 @@ void ModernChat::contextMenuEvent(QContextMenuEvent* ev) {
     stopWheelScroll();
     const QPoint vp = viewport()->mapFrom(this, ev->pos());
     const QModelIndex idx = indexAt(vp);
-    const int row = idx.isValid() ? idx.row() : -1;
+    const int row = ev->reason() == QContextMenuEvent::Keyboard ? currentRow() : idx.row();
 
     QMenu menu(this);
     QAction* copyAct = menu.addAction(QStringLiteral("复制"));

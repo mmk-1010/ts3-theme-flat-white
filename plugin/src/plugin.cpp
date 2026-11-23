@@ -18,6 +18,7 @@
 #include <QInputMethodEvent>
 #include <QMouseEvent>
 #include <QMetaMethod>
+#include <QMutex>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
@@ -52,6 +53,8 @@
 #include <QSizePolicy>
 #include <QWidget>
 #include <QTextBlock>
+#include <QTextDocument>
+#include <QUrl>
 #include <QTextEdit>
 #include <QTextLayout>
 #include <QVariantAnimation>
@@ -65,6 +68,7 @@
 #include "foundation_motion.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <thread>
@@ -86,6 +90,10 @@ QPointer<QScrollArea> g_panelScroll;
 QPointer<QWidget> g_stockToolbar;
 void logLine(const QString& line);
 QPointer<QObject> g_guard;
+// Invalidate both the startup poll and any already-posted GUI startup.
+std::atomic<quint64> g_runGeneration{0};
+QMutex g_startupMutex; // Fence a poll already posting to the application during shutdown.
+std::atomic<bool> g_treeRefreshQueued{false};
 QPointer<QTimer> g_timer;
 QPointer<QTimer> g_stateTimer;
 QPointer<QWidget> g_banner;
@@ -121,12 +129,15 @@ QHash<uint64, int> g_connectionStatus;
 // Saved channel and private chat offsets; -1 means the reader was at the bottom.
 // The server log opens at the newest event.
 QHash<QString, int> g_chatScroll;
+QPointer<QTextDocument> g_pmDocument;
+uint64 g_pmServer = 0;
+QMetaObject::Connection g_pmDocumentConn;
+int g_pmRevision = -1;
 QString g_overlayKey;
 // Conversation the visible notification card belongs to. Cleared as soon as
 // the card is dismissed, so a later tab change cannot hide a newer card.
 QString g_notifyKey;
-anyID g_notifyMode = 0;
-QString g_notifyTabName;
+uint64 g_notifyServer = 0;
 bool g_infoShown = false;
 QMetaObject::Connection g_chatTabConn;
 QPointer<QTreeView> g_styledTree;
@@ -135,12 +146,11 @@ QPointer<QWidget> g_userPanelHost;
 QHash<QTreeView*, QPointer<QAbstractItemDelegate>> g_oldDelegates;
 bool g_installed = false;
 bool g_firstPaintDone = false;
+QPointer<QTreeView> g_firstPaintTree; // Updates temporarily disabled until our first frame.
 // -1 = not detected yet, 0 = light stylesheet, 1 = dark stylesheet.
 int g_darkMode = -1;
 
-void openPrivateChat(unsigned short clientId, const QString& name);
-void openNotificationTarget(uint64 schid, anyID targetMode, anyID clientId,
-                            const QString& tabName);
+void openNotificationTarget(uint64 schid, const QString& key);
 
 // Keeps the custom sidebar covering the stock tree pane without taking part in
 // its layout, so the tree keeps valid geometry for synthetic events.
@@ -181,19 +191,23 @@ private:
 };
 
 QFile* g_log = nullptr;
+QMutex g_logMutex(QMutex::Recursive);
 QPointer<QTreeView> g_tree;
 
-void openLog() {
-    if (g_log && g_log->isOpen()) return;
+// The log may contain chat, names and server details. Never create or truncate
+// the file without explicit opt-in. Caller holds g_logMutex.
+bool openLog() {
+    if (qgetenv("FLAT_WHITE_FILE_LOG") != "1") return false;
+    if (g_log && g_log->isOpen()) return true;
     if (!g_log) g_log = new QFile();
     const QString path = QDir::homePath() + "/AppData/Roaming/TS3Client/flat_white_plugin.log";
     g_log->setFileName(path);
-    g_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
+    return g_log->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
 }
 
 void logLine(const QString& line) {
-    openLog();
-    if (!g_log || !g_log->isOpen()) return;
+    QMutexLocker lock(&g_logMutex);
+    if (!openLog()) return;
     QTextStream ts(g_log);
     ts << QDateTime::currentDateTime().toString("hh:mm:ss.zzz") << " | " << line << "\n";
     ts.flush();
@@ -243,7 +257,9 @@ void dumpTree(QTextStream& ts, QTreeView* tree) {
 }
 
 void dumpWidgets() {
-    openLog();
+    if (qgetenv("FLAT_WHITE_WIDGET_DUMP") != "1") return;
+    QMutexLocker lock(&g_logMutex);
+    if (!openLog()) return;
     QTextStream ts(g_log);
     ts << "\n================ " << QDateTime::currentDateTime().toString(Qt::ISODate) << " ================\n";
     if (!qApp) {
@@ -890,10 +906,12 @@ void restoreLayout() {
 // Temporary: dump model roles so we can tell channels from clients without
 // guessing. Writes to the same log file.
 void dumpRoles() {
+    if (qgetenv("FLAT_WHITE_WIDGET_DUMP") != "1") return;
+    QMutexLocker lock(&g_logMutex);
+    if (!openLog()) return;
     QTreeView* tree = findActiveTree();
     if (!tree || !tree->model()) return;
     QAbstractItemModel* m = tree->model();
-    openLog();
     QTextStream ts(g_log);
     ts << "\n=== ROLE DUMP ===\n";
     std::function<void(const QModelIndex&, int)> walk = [&](const QModelIndex& idx, int depth) {
@@ -1059,7 +1077,7 @@ void styleTree(QTreeView* tree) {
 
     if (!g_oldDelegates.contains(tree)) {
         g_oldDelegates.insert(tree, tree->itemDelegate());
-        QObject::connect(tree, &QObject::destroyed, [tree] { g_oldDelegates.remove(tree); });
+        QObject::connect(tree, &QObject::destroyed, g_guard, [tree] { g_oldDelegates.remove(tree); });
     }
 
     if (!g_treeRows) {
@@ -1079,9 +1097,9 @@ void styleTree(QTreeView* tree) {
     // delegate's name/id cache only caught up on the next 1.5s heartbeat, so
     // a client that just joined kept a stale (missing) row for a moment.
     if (QAbstractItemModel* m = tree->model()) {
-        QObject::connect(m, &QAbstractItemModel::rowsInserted, tree, [] { queueTreeRefresh(); });
-        QObject::connect(m, &QAbstractItemModel::rowsRemoved, tree, [] { queueTreeRefresh(); });
-        QObject::connect(m, &QAbstractItemModel::modelReset, tree, [] { queueTreeRefresh(); });
+        QObject::connect(m, &QAbstractItemModel::rowsInserted, g_guard, [] { queueTreeRefresh(); });
+        QObject::connect(m, &QAbstractItemModel::rowsRemoved, g_guard, [] { queueTreeRefresh(); });
+        QObject::connect(m, &QAbstractItemModel::modelReset, g_guard, [] { queueTreeRefresh(); });
     }
 }
 
@@ -1563,28 +1581,62 @@ void installInfoTab() {
     logLine("info pane moved into the chat page area");
 }
 
-// Plugin-drawn message list for channel chat tabs. The client renders channel
-// chat as plain rich text; the overlay replaces just the log area, leaving the
-// native input box below it untouched. Server and private tabs keep the native
-// view because their markup (inline colours, links) is richer than what we can
-// reproduce from onTextMessageEvent.
+// Mirror only conversations that can be identified; leave TeamSpeak's input
+// and any unresolved native log untouched.
 QString stripChatMarkup(QString text) {
     static const QRegularExpression tag(
-        QStringLiteral("\\[/?(?:B|I|U|S|URL|IMG|COLOR|SIZE|QUOTE|HR|LIST|\\*)(?:=[^\\]]*)?\\]"),
+        QStringLiteral("<br>|\\[(/?)(B|I|U|S|URL|IMG|COLOR|SIZE|QUOTE|HR|LIST|\\*)"
+                       "(?:=(\"[^\"]*\"|'[^']*'|[^\\]]*))?\\]"),
         QRegularExpression::CaseInsensitiveOption);
-    text.remove(tag);
-    text.replace(QStringLiteral("<br>"), QStringLiteral("\n"), Qt::CaseInsensitive);
-    return text.trimmed();
+    QString plain, target;
+    int labelStart = 0;
+    const auto finishLink = [&] {
+        if (target.isEmpty()) return;
+        const QString label = plain.mid(labelStart).trimmed();
+        if (label.isEmpty()) {
+            plain.truncate(labelStart);
+            plain += target;
+        } else if (label != target) {
+            plain += QStringLiteral(" (") + target + QLatin1Char(')');
+        }
+        target.clear();
+    };
+
+    int pos = 0;
+    auto tags = tag.globalMatch(text);
+    while (tags.hasNext()) {
+        const auto match = tags.next();
+        plain += text.midRef(pos, match.capturedStart() - pos);
+        pos = match.capturedEnd();
+        if (match.capturedStart(2) < 0) {
+            plain += QLatin1Char('\n'); // <br>
+        } else if (match.captured(2).compare(QStringLiteral("URL"), Qt::CaseInsensitive) == 0) {
+            finishLink();
+            if (match.captured(1).isEmpty()) {
+                target = match.captured(3).trimmed();
+                if (target.size() >= 2 && (target.front() == '"' || target.front() == '\'') &&
+                    target.back() == target.front())
+                    target = target.mid(1, target.size() - 2);
+                labelStart = plain.size();
+            }
+        }
+    }
+    plain += text.midRef(pos);
+    finishLink();
+    return plain.trimmed();
+}
+
+uint64 activeChatServer() {
+    return g_funcs.getCurrentServerConnectionHandlerID ? g_funcs.getCurrentServerConnectionHandlerID() : 0;
 }
 
 bool currentChannelInfo(uint64& schid, uint64& channel, QString& name) {
-    schid = 0;
+    schid = activeChatServer();
     channel = 0;
     name.clear();
-    if (!g_funcs.getCurrentServerConnectionHandlerID || !g_funcs.getClientID ||
+    if (!schid || !g_funcs.getClientID || !g_funcs.freeMemory ||
         !g_funcs.getChannelOfClient || !g_funcs.getChannelVariableAsString)
         return false;
-    schid = g_funcs.getCurrentServerConnectionHandlerID();
     anyID self = 0;
     if (g_funcs.getClientID(schid, &self) != ERROR_ok || !self) return false;
     if (g_funcs.getChannelOfClient(schid, self, &channel) != ERROR_ok || !channel) return false;
@@ -1599,31 +1651,53 @@ bool currentChannelInfo(uint64& schid, uint64& channel, QString& name) {
 // The client drops a leaving member from its list before the move event is
 // delivered, so getClientDisplayName returns nothing for "left the server".
 // Names are cached while the member is still present.
-QHash<anyID, QString> g_clientNames;
+QHash<uint64, QHash<anyID, QString>> g_clientNames;
 
-QString clientNameById(uint64 schid, anyID id) {
-    if (!id) return QString();
-    if (g_funcs.getClientDisplayName) {
-        char name[512] = {};
-        if (g_funcs.getClientDisplayName(schid, id, name, sizeof(name)) == ERROR_ok) {
-            const QString result = QString::fromUtf8(name);
-            if (!result.isEmpty()) {
-                g_clientNames.insert(id, result);
-                return result;
-            }
-        }
-    }
-    return g_clientNames.value(id);
+QString liveClientName(uint64 schid, anyID id) {
+    char name[512] = {};
+    if (id && g_funcs.getClientDisplayName &&
+        g_funcs.getClientDisplayName(schid, id, name, sizeof(name)) == ERROR_ok)
+        return QString::fromUtf8(name);
+    return {};
 }
 
-QString activePrivateTabText(const QString& channelName) {
-    if (!g_chatTab) return QString();
-    const int index = g_chatTab->currentIndex();
-    if (index <= 0) return QString();
-    const QString text = g_chatTab->tabText(index).trimmed();
-    if (text.isEmpty()) return QString();
-    if (!channelName.isEmpty() && text == channelName) return QString();
-    return text;
+QString clientNameById(uint64 schid, anyID id) {
+    const QString name = liveClientName(schid, id);
+    if (!name.isEmpty()) g_clientNames[schid].insert(id, name);
+    return name.isEmpty() ? g_clientNames.value(schid).value(id) : name;
+}
+
+QString privateChatKey(uint64 schid, const QString& uid) {
+    if (!schid || uid.isEmpty()) return {};
+    return QStringLiteral("p:%1:").arg(schid) + uid;
+}
+
+QString clientString(uint64 schid, anyID id, size_t flag) {
+    char* value = nullptr;
+    if (!id || !g_funcs.getClientVariableAsString || !g_funcs.freeMemory ||
+        g_funcs.getClientVariableAsString(schid, id, flag, &value) != ERROR_ok || !value)
+        return {};
+    const QString result = QString::fromUtf8(value);
+    g_funcs.freeMemory(value);
+    return result;
+}
+
+QString clientUid(uint64 schid, anyID id) {
+    return clientString(schid, id, CLIENT_UNIQUE_IDENTIFIER);
+}
+
+// A title is only a lookup hint, never a history key. Once two peers have
+// used a label, keep that label ambiguous for the rest of this connection.
+struct PrivateRoutes {
+    QHash<QString, QString> aliases;
+};
+QHash<uint64, PrivateRoutes> g_privateAliases;
+void rememberPrivateAlias(uint64 schid, const QString& label, const QString& key) {
+    if (label.isEmpty() || !schid) return;
+    auto& aliases = g_privateAliases[schid].aliases;
+    auto it = aliases.find(label);
+    if (it == aliases.end()) aliases.insert(label, key);
+    else if (it.value() != key) it.value().clear();
 }
 
 QString serverKey(uint64 schid) {
@@ -1661,13 +1735,7 @@ void appendSystemMessage(uint64 schid, const QString& text, int severity = 0, bo
     msg.poke = poke;
     const QString key = serverKey(schid);
     g_chatHistory[key].append(msg);
-    if (g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
-}
-
-void queueSystemMessage(uint64 schid, const QString& text, int severity = 0) {
-    if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [schid, text, severity] { appendSystemMessage(schid, text, severity); },
-                              Qt::QueuedConnection);
+    if (activeChatServer() == schid && g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
 }
 
 QString connectionErrorText(unsigned int error) {
@@ -1705,13 +1773,11 @@ QString operationErrorText(unsigned int error, const QString& message = QString(
 
 void appendOperationError(uint64 schid, const QString& text) {
     appendSystemMessage(schid, text, 2);
-    if (!g_modernChat || !g_modernChat->isVisible() || g_overlayKey.isEmpty() ||
+    if (g_pmDocument || !g_modernChat || !g_modernChat->isVisible() || g_overlayKey.isEmpty() ||
         g_overlayKey == serverKey(schid) || !g_funcs.getCurrentServerConnectionHandlerID ||
         g_funcs.getCurrentServerConnectionHandlerID() != schid) return;
-    // Private keys are name-based; check the active connection as well as the
-    // overlay key so another server's error never enters this conversation.
     const bool channel = g_overlayKey.startsWith(QString::number(schid) + QLatin1Char(':'));
-    if (!channel && !g_overlayKey.startsWith(QStringLiteral("p:"))) return;
+    if (!channel && !g_overlayKey.startsWith(QStringLiteral("p:%1:").arg(schid))) return;
     ChatMessage msg;
     msg.text = text;
     msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
@@ -1727,19 +1793,28 @@ void queueOperationError(uint64 schid, const QString& text) {
                               Qt::QueuedConnection);
 }
 
+// GUI thread only: callbacks may snapshot SDK names, but must not read the UI cache.
+QString eventActorName(uint64 schid, anyID id, const QString& snapshot) {
+    if (!snapshot.isEmpty()) return snapshot;
+    if (!id) return QStringLiteral("服务器");
+    const QString cached = g_clientNames.value(schid).value(id).trimmed();
+    return cached.isEmpty() ? QStringLiteral("用户 #%1").arg(id) : cached;
+}
+
 void queueChannelChange(uint64 schid, uint64 channelId, anyID invokerId,
                         const char* invokerName, bool created) {
     if (!qApp || !g_guard) return;
     // Copy callback data and the current channel name before a later rename
     // or deletion can change them while the UI event is still queued.
     QString actor = invokerName ? QString::fromUtf8(invokerName).trimmed() : QString();
-    if (actor.isEmpty()) actor = clientNameById(schid, invokerId);
-    if (actor.isEmpty())
-        actor = invokerId ? QStringLiteral("用户 #%1").arg(invokerId) : QStringLiteral("服务器");
+    if (actor.isEmpty()) actor = liveClientName(schid, invokerId);
     QString channel = channelNameById(schid, channelId);
     if (channel.isEmpty()) channel = QStringLiteral("#%1").arg(channelId);
-    queueSystemMessage(schid, (created ? QStringLiteral("%1 创建了频道 %2")
-                                       : QStringLiteral("%1 编辑了频道 %2")).arg(actor, channel));
+    QMetaObject::invokeMethod(g_guard, [schid, invokerId, actor, channel, created] {
+        const QString name = eventActorName(schid, invokerId, actor);
+        appendSystemMessage(schid, (created ? QStringLiteral("%1 创建了频道 %2")
+                                           : QStringLiteral("%1 编辑了频道 %2")).arg(name, channel));
+    }, Qt::QueuedConnection);
 }
 
 // MainWindow hosts all floating plugin UI. Re-found on every use: the client
@@ -1769,18 +1844,24 @@ void showToast(const QString& title, const QString& body,
 
 void clearNotifyTarget() {
     g_notifyKey.clear();
-    g_notifyTabName.clear();
-    g_notifyMode = 0;
+    g_notifyServer = 0;
+}
+
+void dismissChatNotice() {
+    clearNotifyTarget();
+    if (g_notifyToast) g_notifyToast->dismiss();
 }
 
 void showPokeToast(uint64 schid, const QString& poker, const QString& message) {
-    // A poke is not a conversation event; it stays until clicked.
+    if (!schid || activeChatServer() != schid) return;
     clearNotifyTarget();
+    g_notifyServer = schid;
     const QString title = poker.isEmpty() ? QStringLiteral("有人戳了戳你")
                                           : QStringLiteral("%1 戳了戳你").arg(poker);
     showToast(title, message.isEmpty() ? QStringLiteral("没有留言") : message,
               [schid] {
-                  openNotificationTarget(schid, TextMessageTarget_SERVER, 0, QString());
+                  clearNotifyTarget();
+                  openNotificationTarget(schid, serverKey(schid));
               });
 }
 
@@ -1814,29 +1895,63 @@ void playNotificationSound(uint64 schid) {
     const QString path = notificationSoundPath();
     if (!path.isEmpty() && g_funcs.playWaveFile && schid) {
         const unsigned int error = g_funcs.playWaveFile(schid, path.toUtf8().constData());
-        logLine(QStringLiteral("notify sound: %1 (error=%2)").arg(path).arg(error));
+        logLine(QStringLiteral("notify sound result=%1").arg(error));
         if (error == ERROR_ok) return;
     }
     // Missing pack or refused playback: still give an audible cue.
     MessageBeep(MB_ICONASTERISK);
 }
 
-// Red dot on the chat tab whose conversation received something the user has
-// not looked at yet. The stylesheet's tab colours veto the client's own unread
-// colour, so the plugin draws the marker itself.
-int chatTabIndexForName(const QString& name) {
-    if (!g_chatTab || name.isEmpty()) return -1;
-    for (int i = 1; i < g_chatTab->count(); ++i) {
-        const QString tab = g_chatTab->tabText(i).trimmed();
-        if (tab.compare(name, Qt::CaseInsensitive) == 0) return i;
+// Routing callbacks and navigating notifications need an exact, unique match
+// on this connection. CLIENT_NICKNAME is the simple title used by TS3 even
+// when getClientDisplayName includes decorations. Neither is a history key.
+bool livePeerMatches(uint64 schid, const QString& label, const QString& key) {
+    if (key.isEmpty() || !g_funcs.getClientList || !g_funcs.freeMemory) return false;
+    anyID* clients = nullptr;
+    if (g_funcs.getClientList(schid, &clients) != ERROR_ok || !clients) return false;
+    bool found = false, certain = true;
+    for (const anyID* id = clients; *id; ++id) {
+        const QString display = liveClientName(schid, *id);
+        const QString nick = clientString(schid, *id, CLIENT_NICKNAME);
+        if (display.isEmpty() && nick.isEmpty()) { certain = false; break; }
+        if (display != label && nick != label) continue;
+        if (found || privateChatKey(schid, clientUid(schid, *id)) != key) { certain = false; break; }
+        found = true;
     }
-    for (int i = 1; i < g_chatTab->count(); ++i) {
-        const QString tab = g_chatTab->tabText(i).trimmed();
-        if (tab.isEmpty()) continue;
-        if (tab.contains(name, Qt::CaseInsensitive) || name.contains(tab, Qt::CaseInsensitive))
-            return i;
+    g_funcs.freeMemory(clients);
+    return found && certain;
+}
+
+QString chatKeyForTab(uint64 schid, uint64 channel, const QString& channelName, int index) {
+    if (!g_chatTab || !schid || schid != activeChatServer() || index < 0 || index >= g_chatTab->count()) return {};
+    if (index == 0) return serverKey(schid);
+    const QString label = g_chatTab->tabText(index);
+    if (label.isEmpty() || !channel || channelName.isEmpty()) return {};
+    for (int i = 1; i < g_chatTab->count(); ++i)
+        if (i != index && g_chatTab->tabText(i) == label) return {};
+    const auto routes = g_privateAliases.constFind(schid);
+    if (label == channelName) {
+        if (routes != g_privateAliases.constEnd() && routes->aliases.contains(label)) return {};
+        return QString::number(schid) + QLatin1Char(':') + QString::number(channel);
     }
-    return -1;
+    if (routes == g_privateAliases.constEnd()) return {};
+    const QString key = routes->aliases.value(label);
+    return livePeerMatches(schid, label, key) ? key : QString();
+}
+
+int chatTabIndexForKey(uint64 schid, const QString& key) {
+    if (!g_chatTab || key.isEmpty()) return -1;
+    uint64 current = 0, channel = 0;
+    QString channelName;
+    currentChannelInfo(current, channel, channelName);
+    if (!current || current != schid) return -1;
+    int index = -1;
+    for (int i = 0; i < g_chatTab->count(); ++i) {
+        if (chatKeyForTab(schid, channel, channelName, i) != key) continue;
+        if (index >= 0) return -1;
+        index = i;
+    }
+    return index;
 }
 
 const QIcon& emptyUnreadDotIcon() {
@@ -1880,10 +1995,10 @@ void refreshUnreadDotIcons() {
     }
 }
 
-void markUnread(const QString& name) {
+void markUnread(uint64 schid, const QString& key) {
     if (!g_chatTab) return;
-    const int index = chatTabIndexForName(name);
-    if (index < 0 || index == g_chatTab->currentIndex()) return;
+    const int index = chatTabIndexForKey(schid, key);
+    if (index <= 0 || index == g_chatTab->currentIndex()) return;
     g_chatTab->setTabIcon(index, unreadDotIcon(discord::isDark()));
 }
 
@@ -1895,93 +2010,126 @@ void focusMainWindow() {
     host->activateWindow();
 }
 
-// Clicking a card opens the conversation behind it: select the tab that owns
-// the conversation, create a private tab through the client's own double-click
-// handler when none exists, and bring the client forward.
-void openNotificationTarget(uint64 schid, anyID targetMode, anyID clientId,
-                            const QString& tabName) {
-    const uint64 current = g_funcs.getCurrentServerConnectionHandlerID
-                               ? g_funcs.getCurrentServerConnectionHandlerID()
-                               : 0;
-    if (schid && current && schid != current) {
-        logLine(QStringLiteral("notify click: conversation on another server (%1)").arg(schid));
-        focusMainWindow();
-        return;
-    }
-    if (!g_chatTab) {
-        if (auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"))) g_chatTab = tw;
-    }
-    int index = -1;
-    if (targetMode == TextMessageTarget_SERVER) {
-        index = (g_chatTab && g_chatTab->count() > 0) ? 0 : -1;
-    } else if (!tabName.isEmpty()) {
-        index = chatTabIndexForName(tabName);
-    }
-    if (index >= 0) {
-        g_chatTab->setCurrentIndex(index);
-    } else if (targetMode == TextMessageTarget_CLIENT && clientId && !tabName.isEmpty()) {
-        // No tab yet: replay the client's double-click on that member row so
-        // the client creates and selects the private chat itself.
-        openPrivateChat(static_cast<unsigned short>(clientId), tabName);
-    }
-    logLine(QStringLiteral("notify click: mode=%1 tab=%2 index=%3")
-                .arg(targetMode)
-                .arg(tabName.isEmpty() ? QStringLiteral("-") : tabName)
-                .arg(index));
+// Never synthesize a native tree double-click from a display name. If the
+// target tab no longer resolves, leave selection and focus alone.
+void openNotificationTarget(uint64 schid, const QString& key) {
+    const int index = chatTabIndexForKey(schid, key);
+    if (index < 0) return;
+    g_chatTab->setCurrentIndex(index);
     focusMainWindow();
 }
 
-// Sound and taskbar flash for every incoming message. The card and the unread
-// dot are only added when the conversation is not the one already on screen.
-void notifyIncoming(uint64 schid, anyID targetMode, anyID clientId,
-                    const QString& title, const QString& body,
-                    const QString& tabName, const QString& chatKey, bool showCard) {
+void notifyIncoming(uint64 schid, const QString& title, const QString& body,
+                    const QString& chatKey, bool showCard) {
+    if (!schid || activeChatServer() != schid) return;
     if (showCard) {
         g_notifyKey = chatKey;
-        g_notifyTabName = tabName;
-        g_notifyMode = targetMode;
-        showToast(title, body, [schid, targetMode, clientId, tabName] {
+        g_notifyServer = schid;
+        showToast(title, body, [schid, chatKey] {
             clearNotifyTarget();
-            openNotificationTarget(schid, targetMode, clientId, tabName);
+            openNotificationTarget(schid, chatKey);
         });
-        markUnread(tabName);
+        markUnread(schid, chatKey);
     }
     playNotificationSound(schid);
     QWidget* host = mainWindowHost();
-    const bool alert = host && (!host->isActiveWindow() || host->isMinimized());
-    if (alert) QApplication::alert(host, 0);
-    logLine(QStringLiteral("notify: %1 | tab=%2 | card=%3 | taskbar=%4")
-                .arg(title, tabName.isEmpty() ? QStringLiteral("-") : tabName,
-                     showCard ? QStringLiteral("on") : QStringLiteral("off"),
-                     alert ? QStringLiteral("flash") : QStringLiteral("skip")));
+    if (host && (!host->isActiveWindow() || host->isMinimized())) QApplication::alert(host, 0);
 }
 
-// Incoming private messages carry the sender's display name, but the chat tab
-// may decorate it (server groups, spacing). Prefer whichever open tab matches.
-QString privateKeyForIncoming(uint64 schid, anyID peerId, const QString& fromName) {
-    QStringList names;
-    names << fromName;
-    const QString display = clientNameById(schid, peerId);
-    if (!display.isEmpty() && display != fromName) names << display;
-    if (g_chatTab) {
-        for (int i = 1; i < g_chatTab->count(); ++i) {
-            const QString tab = g_chatTab->tabText(i).trimmed();
-            if (tab.isEmpty()) continue;
-            for (const QString& candidate : names) {
-                if (candidate.isEmpty()) continue;
-                if (tab.compare(candidate, Qt::CaseInsensitive) == 0 ||
-                    tab.contains(candidate, Qt::CaseInsensitive) ||
-                    candidate.contains(tab, Qt::CaseInsensitive)) {
-                    return QStringLiteral("p:") + tab;
-                }
-            }
-        }
+// Only bind the currently selected document. Nothing read from it is stored
+// under a UID or a title: it may contain pre-plugin history and offline peers.
+void watchPmDocument(QTextDocument* doc) {
+    if (doc == g_pmDocument && (!doc || g_pmDocumentConn)) return;
+    QObject::disconnect(g_pmDocumentConn);
+    g_pmDocument = doc;
+    g_pmRevision = -1;
+    if (doc) {
+        // TS3 may change the tab again before this is delivered. Re-resolve
+        // the selection, never render the signal sender's content directly.
+        g_pmDocumentConn = QObject::connect(doc, &QTextDocument::contentsChanged,
+            g_modernChat.data(), [] { updateChatOverlay(); }, Qt::QueuedConnection);
     }
-    if (!display.isEmpty()) return QStringLiteral("p:") + display;
-    return QStringLiteral("p:") + fromName;
+}
+
+QTextDocument* nativeChatDocument(QWidget* page) {
+    if (!page) return nullptr;
+    auto* log = qobject_cast<QTextEdit*>(page);
+    if (!log || log->objectName() != QLatin1String("ChatTab"))
+        log = page->findChild<QTextEdit*>(QStringLiteral("ChatTab"));
+    return log ? log->document() : nullptr;
+}
+
+// A TS3 paragraph is an optional icon/time followed by a linked sender and
+// ': body'. Older plain transcripts use <hh:mm:ss> nick: body. Keep unfamiliar
+// lines verbatim; never infer a recipient from the text or a client:// ID.
+QVector<ChatMessage> nativePmMessages(QTextDocument* doc, uint64 schid) {
+    anyID self = 0;
+    if (!g_funcs.getClientID || g_funcs.getClientID(schid, &self) != ERROR_ok) self = 0;
+    const QString selfUid = clientUid(schid, self);
+    const QString selfNick = clientString(schid, self, CLIENT_NICKNAME);
+    const QString selfDisplay = liveClientName(schid, self);
+    static const QRegularExpression clock(QStringLiteral(
+        R"(^\s*(?:<(\d{1,2}:\d{2}(?::\d{2})?)>|\[(\d{1,2}:\d{2}(?::\d{2})?)\])\s*)"));
+    QVector<ChatMessage> rows;
+    for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+        ChatMessage msg;
+        QString line, senderUid;
+        int senderStart = -1, senderEnd = -1;
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            const auto format = fragment.charFormat();
+            QString text = fragment.text();
+            if (format.isImageFormat()) {
+                text = format.stringProperty(QTextFormat::ImageAltText);
+                // TS3 prefixes rows with decorative status icons, but an
+                // inline/image-only message still needs a visible equivalent.
+                if (text.isEmpty() && !line.trimmed().isEmpty()) text = QStringLiteral("[图片]");
+            }
+            const QString href = format.anchorHref();
+            if (senderStart < 0 && href.startsWith(QLatin1String("client://"))) {
+                senderStart = line.size();
+                senderEnd = senderStart + text.size();
+                const int slash = href.indexOf(QLatin1Char('/'), 9);
+                const int tilde = href.indexOf(QLatin1Char('~'), slash + 1);
+                if (slash >= 0 && tilde > slash)
+                    senderUid = QUrl::fromPercentEncoding(href.mid(slash + 1, tilde - slash - 1).toUtf8());
+            } else if (senderStart >= 0 && !href.isEmpty() && text != href &&
+                       (href.startsWith(QLatin1String("https://")) || href.startsWith(QLatin1String("http://")))) {
+                text += QStringLiteral(" (%1)").arg(href);
+            }
+            line += text;
+        }
+        line.replace(QChar::LineSeparator, QLatin1Char('\n'));
+        if (line.trimmed().isEmpty()) {
+            if (!block.text().contains(QChar::ObjectReplacementCharacter)) continue;
+            line = QStringLiteral("[图片]");
+        }
+        const auto stamp = clock.match(line);
+        int colon = -1;
+        if (senderStart >= 0 && line.mid(senderEnd).trimmed().startsWith(QLatin1Char(':'))) {
+            colon = line.indexOf(QLatin1Char(':'), senderEnd);
+            msg.sender = line.mid(senderStart, senderEnd - senderStart);
+            msg.time = line.left(senderStart).trimmed(); // Preserve localized dates/times too.
+        } else if (stamp.hasMatch()) {
+            colon = line.indexOf(QLatin1Char(':'), stamp.capturedEnd());
+            if (colon >= 0) msg.sender = line.mid(stamp.capturedEnd(), colon - stamp.capturedEnd()).trimmed();
+            msg.time = stamp.captured(1) + stamp.captured(2);
+        }
+        if (colon >= 0 && !msg.sender.isEmpty()) {
+            msg.text = line.mid(colon + 1).trimmed();
+            msg.self = !senderUid.isEmpty() ? senderUid == selfUid
+                : (msg.sender == selfNick || msg.sender == selfDisplay);
+        } else {
+            msg = ChatMessage{};
+            msg.text = line;
+        }
+        rows.append(msg);
+    }
+    return rows;
 }
 
 void updateChatOverlay() {
+    if (g_notifyServer && g_notifyServer != activeChatServer()) dismissChatNotice();
     if (!g_chatTab) {
         auto* tw = qobject_cast<QTabWidget*>(findWidget("ChatTabWidget"));
         if (!tw) return;
@@ -1995,28 +2143,8 @@ void updateChatOverlay() {
             const bool wasInfoShown = g_infoShown;
             if (wasInfoShown) hideInfoPage();
             else updateChatOverlay();
-            // Manually opening the conversation behind a card dismisses it. A
-            // card that arrived while the user was already on that tab stays;
-            // there was no switch. Private tabs may decorate the peer name, so
-            // the tab text is compared as well as the history key.
-            const QString tab = (g_chatTab && index >= 0)
-                                    ? g_chatTab->tabText(index).trimmed() : QString();
-            uint64 chSchid = 0, chId = 0;
-            QString chName;
-            currentChannelInfo(chSchid, chId, chName);
-            const bool nonPrivateTab = index == 0 || (!chName.isEmpty() && tab == chName);
-            const bool samePrivate =
-                !nonPrivateTab && g_notifyMode == TextMessageTarget_CLIENT &&
-                !g_notifyTabName.isEmpty() && !tab.isEmpty() &&
-                (tab.compare(g_notifyTabName, Qt::CaseInsensitive) == 0 ||
-                 tab.contains(g_notifyTabName, Qt::CaseInsensitive) ||
-                 g_notifyTabName.contains(tab, Qt::CaseInsensitive));
-            const bool targetOpen =
-                (!g_notifyKey.isEmpty() && g_overlayKey == g_notifyKey) || samePrivate;
-            if ((g_overlayKey != before || wasInfoShown) && targetOpen) {
-                clearNotifyTarget();
-                if (g_notifyToast) g_notifyToast->dismiss();
-            }
+            if ((g_overlayKey != before || wasInfoShown) && !g_notifyKey.isEmpty() &&
+                g_notifyKey == g_overlayKey && g_notifyServer == activeChatServer()) dismissChatNotice();
         });
     }
     for (int i = 1; i < g_chatTab->count(); ++i) {
@@ -2061,28 +2189,18 @@ void updateChatOverlay() {
 
     const int index = g_chatTab->currentIndex();
     const QString tabText = index >= 0 ? g_chatTab->tabText(index).trimmed() : QString();
-    const bool serverTab = (index == 0);
-    const bool channelTab = !channelName.isEmpty() && tabText == channelName;
-    const bool privateTab = !serverTab && !channelTab && !tabText.isEmpty();
-    const bool showOverlay = !infoActive && log && (serverTab || channelTab || privateTab);
-
-    QString key;
-    if (serverTab)
-        key = serverKey(schid);
-    else if (channelTab)
-        key = QString::number(schid) + QLatin1Char(':') + QString::number(channel);
-    else if (privateTab)
-        key = QStringLiteral("p:") + tabText;
-
-    static QString lastDecision;
-    const QString decision = QStringLiteral("tab=[%1] channel=[%2] kind=%3 overlay=%4")
-                                 .arg(tabText, channelName,
-                                      serverTab ? "server" : (channelTab ? "channel" : (privateTab ? "private" : "none")),
-                                      showOverlay ? "on" : "off");
-    if (decision != lastDecision) {
-        lastDecision = decision;
-        logLine(QStringLiteral("chat overlay: ") + decision);
-    }
+    const QString key = chatKeyForTab(schid, channel, channelName, index);
+    const bool serverTab = index == 0 && !key.isEmpty();
+    const bool privateTab = index > 0 && schid && !channelName.isEmpty() &&
+                            !tabText.isEmpty() && g_chatTab->tabText(index) != channelName;
+    auto* doc = privateTab ? nativeChatDocument(log) : nullptr;
+    const bool changedDocument = doc != g_pmDocument || (doc && g_pmServer != schid);
+    g_pmServer = doc ? schid : 0;
+    watchPmDocument(doc);
+    // A route is needed for notifications, not for rendering the document
+    // already selected by TS3. Never cover an opaque/unreadable PM widget
+    // with guessed (or empty) callback history.
+    const bool showOverlay = !infoActive && log && (privateTab ? (doc && !doc->isEmpty()) : !key.isEmpty());
 
     if (g_chatHeader) {
         if (serverTab)
@@ -2094,34 +2212,30 @@ void updateChatOverlay() {
     }
 
     if (!showOverlay) {
+        if (doc) g_pmRevision = -1; // Rebuild if history is loaded again while hidden.
+        if (!infoActive || key.isEmpty()) {
+            if (!g_overlayKey.isEmpty() && !g_overlayKey.startsWith(QLatin1String("s:")))
+                g_chatScroll[g_overlayKey] = g_modernChat->isFollowingBottom() ? -1 : g_modernChat->scrollOffset();
+            g_overlayKey.clear();
+        }
         g_modernChat->hide();
         if (!infoActive) host->hide();
         return;
     }
 
     const bool revealingLog = g_modernChat->isHidden();
-    if (g_overlayKey != key) {
+    const bool changedConversation = g_overlayKey != key || changedDocument;
+    if (changedConversation || (doc && g_pmRevision != doc->revision())) {
         g_modernChat->finishWheelScroll();
-        // Remember where the channel or private conversation being left was scrolled to.
-        if (!g_overlayKey.isEmpty() && !g_overlayKey.startsWith(QLatin1String("s:")))
-            g_chatScroll[g_overlayKey] =
-                g_modernChat->isFollowingBottom() ? -1 : g_modernChat->scrollOffset();
+        const int offset = g_modernChat->isFollowingBottom() ? -1 : g_modernChat->scrollOffset();
+        if (changedConversation && !g_overlayKey.isEmpty() && !g_overlayKey.startsWith(QLatin1String("s:")))
+            g_chatScroll[g_overlayKey] = offset;
         g_overlayKey = key;
-        QVector<ChatMessage> messages = g_chatHistory.value(key);
-        if (privateTab && messages.isEmpty()) {
-            for (auto it = g_chatHistory.constBegin(); it != g_chatHistory.constEnd(); ++it) {
-                if (!it.key().startsWith(QStringLiteral("p:"))) continue;
-                const QString peer = it.key().mid(2);
-                if (peer.contains(tabText, Qt::CaseInsensitive) ||
-                    tabText.contains(peer, Qt::CaseInsensitive)) {
-                    messages = it.value();
-                    if (!messages.isEmpty()) break;
-                }
-            }
-        }
+        const auto messages = doc ? nativePmMessages(doc, schid) : g_chatHistory.value(key);
+        if (doc) g_pmRevision = doc->revision();
         g_modernChat->setEmptyText(serverTab ? QStringLiteral("暂无服务器事件")
                                              : QStringLiteral("这里还没有消息，来打个招呼吧"));
-        g_modernChat->setMessages(messages, serverTab ? -1 : g_chatScroll.value(key, -1));
+        g_modernChat->setMessages(messages, serverTab ? -1 : changedConversation ? g_chatScroll.value(key, -1) : offset);
     } else if (revealingLog && serverTab) {
         g_modernChat->scrollToLatest();
     }
@@ -2143,9 +2257,8 @@ void attachBannerIfAny() {
 void updateInfoStatus();
 
 void refreshClientNames() {
-    if (!g_funcs.getClientList || !g_funcs.getClientDisplayName) return;
-    const quint64 h = g_funcs.getCurrentServerConnectionHandlerID
-                          ? g_funcs.getCurrentServerConnectionHandlerID() : 0;
+    if (!g_funcs.getClientList || !g_funcs.getClientDisplayName || !g_funcs.freeMemory) return;
+    const uint64 h = activeChatServer();
     if (!h) return;
     anyID* clients = nullptr;
     if (g_funcs.getClientList(h, &clients) != 0 || !clients) return;
@@ -2153,7 +2266,13 @@ void refreshClientNames() {
         char name[512] = {};
         if (g_funcs.getClientDisplayName(h, *c, name, sizeof(name)) == ERROR_ok) {
             const QString n = QString::fromUtf8(name);
-            if (!n.isEmpty()) g_clientNames.insert(*c, n);
+            if (!n.isEmpty()) {
+                g_clientNames[h].insert(*c, n);
+                // An online peer may reuse an existing conversation's display
+                // name without sending us a message. Never inherit its history.
+                if (g_privateAliases.value(h).aliases.contains(n))
+                    rememberPrivateAlias(h, n, privateChatKey(h, clientUid(h, *c)));
+            }
         }
     }
     g_funcs.freeMemory(clients);
@@ -2391,11 +2510,15 @@ void installChannelPanel() {
 
     // The tree was painted by the client before the delegate existed. Hiding it
     // until the first styled frame removes the flash of the stock rows.
-    if (!g_firstPaintDone) {
+    if (!g_firstPaintDone && tree->updatesEnabled()) {
+        g_firstPaintTree = tree;
         tree->setUpdatesEnabled(false);
-        QTimer::singleShot(0, tree, [tree] {
-            tree->setUpdatesEnabled(true);
-            tree->viewport()->update();
+        QTimer::singleShot(0, g_guard, [] {
+            if (g_firstPaintTree) {
+                g_firstPaintTree->setUpdatesEnabled(true);
+                g_firstPaintTree->viewport()->update();
+                g_firstPaintTree = nullptr;
+            }
             g_firstPaintDone = true;
         });
     }
@@ -2407,57 +2530,6 @@ void installChannelPanel() {
     updateInfoStatus();
     layoutPane();
     if (g_userPanel) g_userPanel->refresh();
-}
-
-// TS3 opens a private chat when its tree emits doubleClicked. Rather than
-// looking for an API call that does not exist, replay that signal on the
-// (hidden) stock tree for the matching client row.
-void openPrivateChat(unsigned short clientId, const QString& name) {
-    Q_UNUSED(clientId);
-    QTreeView* tree = findServerTree();
-    if (!tree || !tree->model()) return;
-    QAbstractItemModel* m = tree->model();
-
-    std::function<QModelIndex(const QModelIndex&, int)> find =
-        [&](const QModelIndex& parent, int depth) -> QModelIndex {
-        for (int i = 0, n = m->rowCount(parent); i < n; ++i) {
-            const QModelIndex idx = m->index(i, 0, parent);
-            const QString text = idx.data(Qt::DisplayRole).toString();
-            if (depth >= 2 && m->rowCount(idx) == 0 &&
-                (text == name || text.endsWith(QStringLiteral(" ") + name))) {
-                return idx;
-            }
-            const QModelIndex found = find(idx, depth + 1);
-            if (found.isValid()) return found;
-        }
-        return QModelIndex();
-    };
-
-    const QModelIndex idx = find(QModelIndex(), 0);
-    if (!idx.isValid()) {
-        logLine(QString("chat: no client row found for %1").arg(name));
-        return;
-    }
-    // Expand ancestors and scroll the row into view so it has a real rect.
-    for (QModelIndex p = idx.parent(); p.isValid(); p = p.parent()) tree->expand(p);
-    tree->setCurrentIndex(idx);
-    tree->scrollTo(idx);
-
-    const QRect vr = tree->visualRect(idx);
-    if (!vr.isValid()) {
-        logLine(QString("chat: row rect unavailable for %1").arg(name));
-        return;
-    }
-    QWidget* vp = tree->viewport();
-    const QPoint pos = vr.center();
-    const QPoint global = vp->mapToGlobal(pos);
-    QMouseEvent press(QEvent::MouseButtonPress, pos, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-    QMouseEvent dbl(QEvent::MouseButtonDblClick, pos, global, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-    QMouseEvent rel(QEvent::MouseButtonRelease, pos, global, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-    QApplication::sendEvent(vp, &press);
-    QApplication::sendEvent(vp, &dbl);
-    QApplication::sendEvent(vp, &rel);
-    logLine(QString("chat: synthetic double-click for %1 at %2,%3").arg(name).arg(pos.x()).arg(pos.y()));
 }
 
 void applyLayout();
@@ -2548,11 +2620,11 @@ void heartbeatNow() {
 void startBurst() {
     if (!qApp || !g_guard) return;
     if (!g_burstTimer) {
-        g_burstTimer = new QTimer(qApp);
+        g_burstTimer = new QTimer(g_guard);
         g_burstTimer->setInterval(50);
         QObject::connect(g_burstTimer, &QTimer::timeout, g_guard, [] {
-            heartbeat();
             if (++g_burstTicks >= 60) g_burstTimer->stop();
+            heartbeat();
         });
     }
     g_burstTicks = 0;
@@ -2600,12 +2672,9 @@ void heartbeat() {
 // The native model updates itself; we only need to refresh our name/id caches
 // and repaint. Coalesce the burst of move events.
 void queueTreeRefresh() {
-    if (!qApp) return;
-    static bool queued = false;
-    if (queued || !g_guard) return;
-    queued = true;
+    if (!qApp || !g_guard || g_treeRefreshQueued.exchange(true)) return;
     QMetaObject::invokeMethod(g_guard, [] {
-        queued = false;
+        g_treeRefreshQueued = false;
         QTreeView* tree = findActiveTree();
         styleTree(tree);
         if (g_treeRows) g_treeRows->refresh();
@@ -2613,7 +2682,9 @@ void queueTreeRefresh() {
     }, Qt::QueuedConnection);
 }
 
-void onUiReady() {
+void onUiReady(quint64 generation) {
+    if (generation != g_runGeneration || !qApp || QCoreApplication::closingDown() || g_guard) return;
+    g_guard = new QObject(qApp);
     logLine("onUiReady");
     dumpWidgets();
     if (qApp) {
@@ -2626,8 +2697,7 @@ void onUiReady() {
                     .arg(qApp->styleSheet().size())
                     .arg(qApp->palette().color(QPalette::Window).name()));
     }
-    if (!g_guard) g_guard = new QObject(qApp);
-    if (qgetenv("FLAT_WHITE_SELF_TALK_TRACE") == "1") {
+    if (qgetenv("FLAT_WHITE_SELF_TALK_TRACE") == "1" && qgetenv("FLAT_WHITE_FILE_LOG") == "1") {
         g_talkTraceStart = SelfTalkState::Clock::now();
         g_talkTraceUntil = g_talkTraceStart + std::chrono::minutes(10);
         logLine(QStringLiteral("self-talk trace enabled for 10 minutes"));
@@ -2645,7 +2715,7 @@ void onUiReady() {
         g_stateTimer->setInterval(600);
         QObject::connect(g_stateTimer, &QTimer::timeout, g_guard, [] { refreshClientStatesNow(); });
         g_stateTimer->start();
-        QObject::connect(qApp, &QCoreApplication::aboutToQuit, qApp, [] { cleanupUi(); });
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, g_guard, [] { cleanupUi(); });
     }
     installChannelPanel();
     updateLayout();
@@ -2699,21 +2769,33 @@ extern "C" __declspec(dllexport) int ts3plugin_init() {
     HMODULE self = nullptr;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                        reinterpret_cast<LPCSTR>(&ts3plugin_init), &self);
-    std::thread([] {
-        for (int i = 0; i < 120; ++i) {
-            if (QCoreApplication::instance()) {
-                QMetaObject::invokeMethod(QCoreApplication::instance(), [] { onUiReady(); },
-                                          Qt::QueuedConnection);
-                return;
+    const quint64 generation = ++g_runGeneration;
+    const auto postWhenReady = [generation] {
+        QMutexLocker lock(&g_startupMutex);
+        if (g_runGeneration != generation) return true; // Cancel the poll, too.
+        auto* app = QCoreApplication::instance();
+        if (!app) return false;
+        QMetaObject::invokeMethod(app, [generation] { onUiReady(generation); }, Qt::QueuedConnection);
+        return true;
+    };
+    if (!postWhenReady()) {
+        std::thread([postWhenReady] {
+            for (int i = 0; i < 120; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                if (postWhenReady()) break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        }
-    }).detach();
+        }).detach();
+    }
     return 0;
 }
-void cleanupUi() {
+static void cleanupUiOnGuiThread() {
     if (g_stockToolbar) g_stockToolbar->show();
+    g_stockToolbar = nullptr;
+    if (g_firstPaintTree) g_firstPaintTree->setUpdatesEnabled(true);
+    g_firstPaintTree = nullptr;
 
+    if (g_burstTimer) { g_burstTimer->stop(); delete g_burstTimer.data(); }
+    g_burstTicks = 0;
     if (g_stateTimer) { g_stateTimer->stop(); delete g_stateTimer.data(); g_stateTimer = nullptr; }
     if (g_timer) { g_timer->stop(); delete g_timer.data(); g_timer = nullptr; }
     if (g_frameFilter) {
@@ -2723,9 +2805,24 @@ void cleanupUi() {
     }
     resetWindowFrames();
     delete g_treeWheelMotion.data();
+    // Restore while the guard's tree-destruction connections still protect the keys.
+    for (auto it = g_oldDelegates.begin(); it != g_oldDelegates.end(); ++it) {
+        if (it.key() && it.value()) it.key()->setItemDelegate(it.value());
+    }
+    g_oldDelegates.clear();
+    delete g_treeRows.data();
+    g_styledTree = nullptr;
     delete g_guard.data();
     g_guard = nullptr;
+    g_treeRefreshQueued = false;
     g_connectionStatus.clear();
+    g_chatHistory.clear();
+    g_chatScroll.clear();
+    g_clientNames.clear();
+    watchPmDocument(nullptr);
+    g_privateAliases.clear();
+    g_overlayKey.clear();
+    clearNotifyTarget();
     g_selfTalk = {};
     g_talkTraceUntil = {};
 
@@ -2763,17 +2860,38 @@ void cleanupUi() {
         restoreContentHost();
     }
 
-    for (auto it = g_oldDelegates.begin(); it != g_oldDelegates.end(); ++it) {
-        if (it.key() && it.value()) it.key()->setItemDelegate(it.value());
-    }
-    g_oldDelegates.clear();
-    delete g_treeRows.data();
-    g_treeRows = nullptr;
-
     if (g_userPanel) { delete g_userPanel.data(); g_userPanel = nullptr; }
     if (g_chatHeader) { delete g_chatHeader.data(); g_chatHeader = nullptr; }
     if (g_paneFilter) { delete g_paneFilter.data(); g_paneFilter = nullptr; }
+    g_installed = false;
+    g_firstPaintDone = false;
+    g_darkMode = -1;
+    g_paneTree = nullptr;
+    g_userPanelHost = nullptr;
+    g_infoTree = nullptr;
+    g_banner = nullptr;
+    g_bannerHome = nullptr;
+    g_infoFrame = nullptr;
+    g_infoHome = nullptr;
+    g_infoSplitter = nullptr;
+    g_chatStack = nullptr;
+    g_saved = {};
+    g_pluginId.clear();
+    QMutexLocker lock(&g_logMutex);
     if (g_log) { g_log->close(); delete g_log; g_log = nullptr; }
+}
+
+void cleanupUi() {
+    {
+        QMutexLocker lock(&g_startupMutex);
+        ++g_runGeneration;
+    }
+    auto* app = QCoreApplication::instance();
+    if (app && app->thread() != QThread::currentThread()) {
+        QMetaObject::invokeMethod(app, [] { cleanupUiOnGuiThread(); }, Qt::BlockingQueuedConnection);
+    } else {
+        cleanupUiOnGuiThread();
+    }
 }
 
 extern "C" __declspec(dllexport) void ts3plugin_shutdown() {
@@ -2815,6 +2933,22 @@ extern "C" __declspec(dllexport) void ts3plugin_onTalkStatusChangeEvent(
     }, Qt::QueuedConnection);
 }
 
+// Native tab widgets can be reused on another server. Invalidate plugin
+// decorations promptly, even when switching servers doesn't change tab index.
+extern "C" __declspec(dllexport) void ts3plugin_currentServerConnectionChanged(uint64) {
+    if (!qApp || !g_guard) return;
+    QMetaObject::invokeMethod(g_guard, [] {
+        if (g_notifyServer && g_notifyServer != activeChatServer()) dismissChatNotice();
+        if (!g_chatTab) return;
+        for (int i = 1; i < g_chatTab->count(); ++i) {
+            const auto icon = g_chatTab->tabIcon(i).cacheKey();
+            if (icon == unreadDotIcon(false).cacheKey() || icon == unreadDotIcon(true).cacheKey())
+                g_chatTab->setTabIcon(i, emptyUnreadDotIcon());
+        }
+        updateChatOverlay();
+    }, Qt::QueuedConnection);
+}
+
 extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
     uint64 serverConnectionHandlerID, int status, unsigned int errorNumber) {
     if (!qApp || !g_guard) return;
@@ -2829,7 +2963,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
         case STATUS_CONNECTED: text = QStringLiteral("服务器已接受连接"); break;
         case STATUS_CONNECTION_ESTABLISHING: text = QStringLiteral("正在进入服务器…"); break;
         case STATUS_CONNECTION_ESTABLISHED: text = QStringLiteral("已连接到服务器"); break;
-        case STATUS_DISCONNECTED:
+        case STATUS_DISCONNECTED: {
             if (g_selfTalk.server == serverConnectionHandlerID) {
                 bindSelfTalk(0, 0);
                 publishSelfTalk();
@@ -2845,7 +2979,26 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
                 text = QStringLiteral("与服务器的连接已断开");
             }
             g_connectionStatus.remove(serverConnectionHandlerID);
+            g_clientNames.remove(serverConnectionHandlerID);
+            g_privateAliases.remove(serverConnectionHandlerID);
+            if (g_notifyServer == serverConnectionHandlerID) dismissChatNotice();
+            // A handler can reconnect to a different physical server. Don't
+            // make the old session's peer history addressable on the new one.
+            const QString prefix = QStringLiteral("p:%1:").arg(serverConnectionHandlerID);
+            for (const QString& key : g_chatHistory.keys()) {
+                if (!key.startsWith(prefix)) continue;
+                g_chatHistory.remove(key);
+                g_chatScroll.remove(key);
+            }
+            if (g_overlayKey.startsWith(prefix) || g_pmServer == serverConnectionHandlerID) {
+                watchPmDocument(nullptr);
+                g_pmServer = 0;
+                g_overlayKey.clear();
+                if (g_modernChat) g_modernChat->hide();
+                if (!g_infoShown && g_cardHost) g_cardHost->hide();
+            }
             break;
+        }
         default: break;
         }
         if (!text.isEmpty()) appendSystemMessage(serverConnectionHandlerID, text, severity);
@@ -2856,12 +3009,15 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
     }, Qt::QueuedConnection);
     // A reconnect rebuilds the panes from scratch, so the stock widgets are
     // painted again; catch the new tree within a couple of frames.
-    if (status == STATUS_CONNECTED || status == STATUS_CONNECTION_ESTABLISHED) startBurst();
+    if (status == STATUS_CONNECTED || status == STATUS_CONNECTION_ESTABLISHED)
+        QMetaObject::invokeMethod(g_guard, [] { startBurst(); }, Qt::AutoConnection);
     // Entering a server lands on whatever page was open last time, often the
     // client's own info page. Open the server event log instead.
-    if (status == STATUS_CONNECTION_ESTABLISHED) {
+    if (status == STATUS_CONNECTION_ESTABLISHED && serverConnectionHandlerID &&
+        activeChatServer() == serverConnectionHandlerID) {
         if (!g_guard) return;
-        QMetaObject::invokeMethod(g_guard, [] {
+        QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID] {
+            if (!serverConnectionHandlerID || activeChatServer() != serverConnectionHandlerID) return;
             if (g_infoShown) hideInfoPage();
             if (g_chatTab && g_chatTab->currentIndex() != 0) g_chatTab->setCurrentIndex(0);
             updateChatOverlay();
@@ -2893,12 +3049,13 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientMoveEvent(
     int visibility, const char* moveMessage) {
     Q_UNUSED(visibility);
     Q_UNUSED(moveMessage);
-    // Cache the name while the member is still listed: the client drops a
-    // leaving member before this callback runs, so the lookup would fail.
-    if (newChannelID != 0) refreshClientNames();
+    // Snapshot the name in the event's own server context. The cached
+    // fallback for departures lives exclusively on the GUI thread.
+    const QString snapshot = newChannelID ? liveClientName(serverConnectionHandlerID, clientID) : QString();
     queueTreeRefresh();
     if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, oldChannelID, newChannelID] {
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, oldChannelID, newChannelID, snapshot] {
+        if (!snapshot.isEmpty()) g_clientNames[serverConnectionHandlerID].insert(clientID, snapshot);
         anyID self = 0;
         if (g_funcs.getClientID) g_funcs.getClientID(serverConnectionHandlerID, &self);
         if (clientID == self) {
@@ -2951,15 +3108,20 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientMoveMovedEvent(
     const char* moveMessage) {
     Q_UNUSED(oldChannelID);
     Q_UNUSED(visibility);
-    Q_UNUSED(moverID);
     Q_UNUSED(moverUniqueIdentifier);
     Q_UNUSED(moveMessage);
     queueTreeRefresh();
     if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, newChannelID, moverName] {
+    // Resolve on the event's connection before the mover disappears or the ID is reused.
+    QString actor = liveClientName(serverConnectionHandlerID, moverID).trimmed();
+    if (actor.isEmpty() && moverName) {
+        const QString decoded = QString::fromUtf8(moverName);
+        if (decoded.toUtf8() == moverName) actor = decoded.trimmed();
+    }
+    QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, clientID, newChannelID, moverID, actor] {
+        const QString mover = eventActorName(serverConnectionHandlerID, moverID, actor);
         QString name = clientNameById(serverConnectionHandlerID, clientID);
         if (name.isEmpty()) name = QStringLiteral("用户");
-        const QString mover = (moverName && *moverName) ? QString::fromUtf8(moverName) : QStringLiteral("管理员");
         appendSystemMessage(serverConnectionHandlerID,
                             QStringLiteral("%1 被 %2 移动到 %3")
                                 .arg(name, mover,
@@ -3021,8 +3183,6 @@ extern "C" __declspec(dllexport) void ts3plugin_onServerLogEvent(
         return;
     }
     if (line.isEmpty()) return;
-    const QString schid = QString::number(serverConnectionHandlerID);
-    logLine(QStringLiteral("server log [%1|%2]: %3").arg(schid, severityText, line));
     QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, line, severity] {
         appendSystemMessage(serverConnectionHandlerID, line, severity);
     }, Qt::QueuedConnection);
@@ -3039,7 +3199,6 @@ extern "C" __declspec(dllexport) int ts3plugin_onServerErrorEvent(
     const QString text = operationErrorText(error,
         errorMessage ? QString::fromUtf8(errorMessage) : QString(),
         extraMessage ? QString::fromUtf8(extraMessage) : QString());
-    logLine(QStringLiteral("server error [%1]: %2").arg(error).arg(text));
     queueOperationError(serverConnectionHandlerID, text);
     return 0;
 }
@@ -3063,27 +3222,20 @@ extern "C" __declspec(dllexport) int ts3plugin_onServerPermissionErrorEvent(
     if (!perm.isEmpty()) text = text.isEmpty() ? perm : text + QStringLiteral("（") + perm + QStringLiteral("）");
     if (text.isEmpty()) text = QStringLiteral("权限不足");
     text = operationErrorText(error, text);
-    logLine(QStringLiteral("permission error [%1]: %2").arg(failedPermissionID).arg(text));
     queueOperationError(serverConnectionHandlerID, text);
     return 0;
 }
 // A poke is delivered only to its target and is not a text message, so the
 // overlay would otherwise stay silent when someone pokes you.
-extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
+extern "C" __declspec(dllexport) int ts3plugin_onClientPokeEvent(
     uint64 serverConnectionHandlerID, anyID fromClientID, const char* pokerName,
     const char* pokerUniqueIdentity, const char* message, int ffIgnored) {
     Q_UNUSED(pokerUniqueIdentity);
-    Q_UNUSED(ffIgnored);
-    if (!qApp || !g_guard) return;
+    if (ffIgnored || !serverConnectionHandlerID || !qApp || !g_guard) return 0;
     const QString rawName =
         (pokerName && *pokerName) ? QString::fromUtf8(pokerName).trimmed() : QString();
     const QString text = (message && *message) ? QString::fromUtf8(message).trimmed() : QString();
-    logLine(QStringLiteral("poke raw from=%1 name=%2: %3")
-                .arg(fromClientID)
-                .arg(rawName.isEmpty() ? QStringLiteral("?") : rawName, text));
-    // Pokes belong to the server tab; when that tab is not the one on screen,
-    // surface the poke in whichever chat overlay is visible so it cannot be
-    // missed. The toast covers the case where no chat surface is on screen.
+    // A poke belongs to its server, never to an unrelated private history.
     QMetaObject::invokeMethod(g_guard, [serverConnectionHandlerID, fromClientID, rawName, text] {
         QString name = rawName;
         if (name.isEmpty()) name = clientNameById(serverConnectionHandlerID, fromClientID);
@@ -3093,102 +3245,85 @@ extern "C" __declspec(dllexport) void ts3plugin_onClientPokeEvent(
                                  : QStringLiteral("%1 戳了戳你：%2").arg(shown, text);
         appendSystemMessage(serverConnectionHandlerID, line, 0, true);
         showPokeToast(serverConnectionHandlerID, name, text);
-        if (g_modernChat && g_modernChat->isVisible() && !g_overlayKey.isEmpty() &&
-            g_overlayKey != serverKey(serverConnectionHandlerID)) {
-            ChatMessage msg;
-            msg.text = line;
-            msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
-            msg.system = true;
-            msg.poke = true;
-            g_chatHistory[g_overlayKey].append(msg);
-            g_modernChat->addMessage(msg);
-        }
     }, Qt::QueuedConnection);
+    return 0; // Let TeamSpeak perform its normal handling (including ignore rules).
 }
 
-// Channel chat mirror: store per-channel history and append live messages to
-// the overlay when that channel's chat tab is the visible page.
-extern "C" __declspec(dllexport) void ts3plugin_onTextMessageEvent(
+// Capture the peer/channel while the SDK still describes this event. The UI
+// queue may run after a tab switch, rename, move, disconnect, or client-ID reuse.
+extern "C" __declspec(dllexport) int ts3plugin_onTextMessageEvent(
     uint64 serverConnectionHandlerID, anyID targetMode, anyID toID, anyID fromID,
     const char* fromName, const char* fromUniqueIdentifier, const char* message, int ffIgnored) {
-    Q_UNUSED(fromUniqueIdentifier);
-    Q_UNUSED(ffIgnored);
-    if (!qApp || !g_guard || !message) return;
-    // Temporary: proves which callback the server's own notices arrive on.
-    logLine(QStringLiteral("text msg raw mode=%1 from=%2 to=%3: %4")
-                .arg(targetMode).arg(fromID).arg(toID).arg(QString::fromUtf8(message).left(120)));
-    const QString name = (fromName && *fromName) ? QString::fromUtf8(fromName) : QStringLiteral("未知用户");
-    const QString text = stripChatMarkup(QString::fromUtf8(message));
-    if (text.isEmpty()) return;
+    if (ffIgnored || !serverConnectionHandlerID || !qApp || !g_guard || !message) return 0;
     if (targetMode != TextMessageTarget_CHANNEL && targetMode != TextMessageTarget_CLIENT &&
-        targetMode != TextMessageTarget_SERVER)
-        return;
-    QMetaObject::invokeMethod(g_guard, [targetMode, name, text, fromID, toID, serverConnectionHandlerID] {
-        anyID self = 0;
-        if (g_funcs.getClientID)
-            g_funcs.getClientID(serverConnectionHandlerID, &self);
-        const bool isSelf = (self && self == fromID);
-        QString key;
-        uint64 msgChannelId = 0;
-        if (targetMode == TextMessageTarget_CHANNEL) {
-            // Channel events arrive with toID == 0, so derive the channel from
-            // the sender; that is also the channel the open tab is keyed on.
-            uint64 chId = 0;
-            if (g_funcs.getChannelOfClient &&
-                g_funcs.getChannelOfClient(serverConnectionHandlerID, fromID, &chId) != ERROR_ok)
-                chId = 0;
-            if (!chId) {
-                uint64 schid = 0, cur = 0;
-                QString chName;
-                if (currentChannelInfo(schid, cur, chName) && schid == serverConnectionHandlerID)
-                    chId = cur;
+        targetMode != TextMessageTarget_SERVER) return 0;
+    const uint64 schid = serverConnectionHandlerID;
+    anyID self = 0;
+    if (!g_funcs.getClientID || g_funcs.getClientID(schid, &self) != ERROR_ok) self = 0;
+    const bool isSelf = self && self == fromID;
+    const QString sender = fromName ? QString::fromUtf8(fromName) : QString();
+    const QString text = stripChatMarkup(QString::fromUtf8(message));
+    if (text.isEmpty()) return 0;
+
+    QString key, peerName, peerDisplay, peerNick, channelName;
+    if (targetMode == TextMessageTarget_CLIENT) {
+        const anyID peer = self ? (isSelf ? toID : fromID) : 0;
+        if (peer && peer != self && (isSelf || !toID || toID == self)) {
+            const QString liveUid = clientUid(schid, peer);
+            QString uid = liveUid;
+            if (!isSelf) {
+                peerName = sender;
+                if (fromUniqueIdentifier && *fromUniqueIdentifier) uid = QString::fromUtf8(fromUniqueIdentifier);
             }
-            msgChannelId = chId;
-            key = QString::number(serverConnectionHandlerID) + QLatin1Char(':') + QString::number(chId);
-        } else if (targetMode == TextMessageTarget_SERVER) {
-            key = serverKey(serverConnectionHandlerID);
-        } else if (!isSelf) {
-            key = privateKeyForIncoming(serverConnectionHandlerID, fromID, name);
-        } else {
-            uint64 chId = 0;
-            uint64 chSchid = 0;
-            QString chName;
-            currentChannelInfo(chSchid, chId, chName);
-            QString peer = activePrivateTabText(chName);
-            if (peer.isEmpty()) peer = clientNameById(serverConnectionHandlerID, toID);
-            if (peer.isEmpty()) return;
-            key = QStringLiteral("p:") + peer;
+            key = privateChatKey(schid, uid);
+            // The SDK lookup might now describe a different occupant of this ID.
+            if (liveUid == uid) {
+                peerDisplay = liveClientName(schid, peer);
+                peerNick = clientString(schid, peer, CLIENT_NICKNAME);
+            }
         }
-        logLine(QStringLiteral("text msg mode=%1 key=%2").arg(targetMode).arg(key));
+    } else if (targetMode == TextMessageTarget_CHANNEL) {
+        uint64 channel = 0;
+        if (!g_funcs.getChannelOfClient ||
+            g_funcs.getChannelOfClient(schid, fromID, &channel) != ERROR_ok || !channel) return 0;
+        key = QString::number(schid) + QLatin1Char(':') + QString::number(channel);
+        channelName = channelNameById(schid, channel);
+    } else {
+        key = serverKey(schid);
+    }
+
+    QMetaObject::invokeMethod(g_guard, [schid, targetMode, sender, text, key, peerName, peerDisplay, peerNick, channelName, isSelf] {
+        if (targetMode == TextMessageTarget_CLIENT) {
+            rememberPrivateAlias(schid, peerName, key);
+            rememberPrivateAlias(schid, peerDisplay, key);
+            rememberPrivateAlias(schid, peerNick, key);
+            // Drop unidentified events rather than assigning them to the active
+            // tab or disabling unrelated, verified routes for the connection.
+            if (key.isEmpty()) return;
+            if (activeChatServer() == schid && g_chatTab) updateChatOverlay();
+        }
+        const QString name = sender.isEmpty() ? QStringLiteral("未知用户") : sender;
         ChatMessage msg;
         msg.sender = name;
         msg.text = text;
         msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
         msg.self = isSelf;
         g_chatHistory[key].append(msg);
-        if (g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
+        if (activeChatServer() != schid) return;
+        if (!g_pmDocument && g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
         if (isSelf) return;
 
-        // The overlay only paints the conversation currently on screen. If the
-        // message belongs to that visible conversation, skip the card entirely:
-        // the sound and (when the window is in the background) the taskbar
-        // flash are enough. Other conversations still get a card.
-        const bool visible = (g_overlayKey == key) && g_modernChat && g_modernChat->isVisible();
-
+        const bool visible = g_overlayKey == key && g_modernChat && g_modernChat->isVisible() && !g_infoShown;
         QString title;
-        QString tabName;
         if (targetMode == TextMessageTarget_CHANNEL) {
-            const QString channelName = channelNameById(serverConnectionHandlerID, msgChannelId);
-            tabName = channelName;
             title = channelName.isEmpty() ? QStringLiteral("%1 发来频道消息").arg(name)
                                           : QStringLiteral("%1 · #%2").arg(name, channelName);
         } else if (targetMode == TextMessageTarget_CLIENT) {
-            tabName = key.startsWith(QStringLiteral("p:")) ? key.mid(2) : name;
             title = QStringLiteral("%1 · 私聊").arg(name);
         } else {
             title = QStringLiteral("%1 · 服务器消息").arg(name);
         }
-        notifyIncoming(serverConnectionHandlerID, targetMode, fromID, title, text, tabName, key,
-                       !visible);
+        notifyIncoming(schid, title, text, key, !visible);
     }, Qt::QueuedConnection);
+    return 0;
 }
