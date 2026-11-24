@@ -1,6 +1,7 @@
 #include "channelpanel.h"
 
 #include <QEvent>
+#include <QMainWindow>
 #include <QApplication>
 #include <QAbstractItemModel>
 #include <QClipboard>
@@ -2441,15 +2442,46 @@ NotifyToast::NotifyToast(QWidget* parent) : QWidget(parent) {
     setAttribute(Qt::WA_ShowWithoutActivating);
     setFocusPolicy(Qt::NoFocus);
     setCursor(Qt::PointingHandCursor);
-    setToolTip(QStringLiteral("点击关闭"));
-    setFixedSize(kToastWidth, kToastHeight);
+    setToolTip(QStringLiteral("点击打开对应聊天"));
+    setFixedHeight(kToastHeight);
+    if (parent) parent->installEventFilter(this);
     hide();
+}
+
+bool NotifyToast::eventFilter(QObject* object, QEvent* event) {
+    if (object == parentWidget() && !isHidden()) {
+        switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::Resize:
+        case QEvent::LayoutRequest:
+            // The main window can lay out its central widget after this event.
+            QMetaObject::invokeMethod(this, [this] {
+                if (isHidden()) return;
+                reposition();
+                raise();
+            }, Qt::QueuedConnection);
+            break;
+        default:
+            break;
+        }
+    }
+    return QWidget::eventFilter(object, event);
 }
 
 void NotifyToast::reposition() {
     QWidget* host = parentWidget();
     if (!host) return;
-    move(qMax(kToastMargin, host->width() - width() - kToastMargin), kToastMargin);
+    QRect area = host->contentsRect();
+    if (auto* main = qobject_cast<QMainWindow*>(host)) {
+        const auto* central = main->centralWidget();
+        if (central && central->isVisibleTo(host) && !central->geometry().isEmpty())
+            area = area.intersected(central->geometry());
+    }
+    if (area.isEmpty()) return;
+    const int inset = qMin(kToastMargin, area.width() / 4);
+    const int cardWidth = qMin(kToastWidth, area.width() - 2 * inset);
+    setGeometry(area.right() + 1 - inset - cardWidth, area.top() + kToastMargin,
+                cardWidth, kToastHeight);
 }
 
 void NotifyToast::showNotice(const QString& title, const QString& body) {

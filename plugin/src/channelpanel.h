@@ -416,16 +416,16 @@ public:
     // Hides without running onActivate; used when the conversation is opened
     // by other means (tab switch).
     void dismiss();
-    void reposition();
 
-    // Runs on click, before the card is hidden.
     std::function<void()> onActivate;
 
 protected:
+    bool eventFilter(QObject* object, QEvent* event) override;
     void paintEvent(QPaintEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
 
 private:
+    void reposition();
     QString m_title;
     QString m_body;
     int m_count = 0;

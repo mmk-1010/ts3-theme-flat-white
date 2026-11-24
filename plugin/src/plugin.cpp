@@ -129,6 +129,10 @@ QHash<uint64, int> g_connectionStatus;
 // Saved channel and private chat offsets; -1 means the reader was at the bottom.
 // The server log opens at the newest event.
 QHash<QString, int> g_chatScroll;
+QPointer<QTextDocument> g_serverErrorDocument;
+uint64 g_serverErrorConnection = 0;
+QMetaObject::Connection g_serverErrorDocumentConn;
+QString g_serverErrorStyle;
 QPointer<QTextDocument> g_pmDocument;
 uint64 g_pmServer = 0;
 QMetaObject::Connection g_pmDocumentConn;
@@ -428,6 +432,8 @@ void installContentHost(QWidget* content) {
     contentLayout->addWidget(content);
     window->setCentralWidget(host);
     content->setVisible(visible);
+    if (g_notifyToast && g_notifyToast->parentWidget() == window && !g_notifyToast->isHidden())
+        g_notifyToast->raise();
 }
 
 void restoreContentHost() {
@@ -1773,24 +1779,65 @@ QString operationErrorText(unsigned int error, const QString& message = QString(
 
 void appendOperationError(uint64 schid, const QString& text) {
     appendSystemMessage(schid, text, 2);
-    if (g_pmDocument || !g_modernChat || !g_modernChat->isVisible() || g_overlayKey.isEmpty() ||
-        g_overlayKey == serverKey(schid) || !g_funcs.getCurrentServerConnectionHandlerID ||
-        g_funcs.getCurrentServerConnectionHandlerID() != schid) return;
+    if (!g_modernChat || !g_modernChat->isVisible() || g_infoShown || activeChatServer() != schid ||
+        g_overlayKey == serverKey(schid)) return;
+    const bool nativePm = g_pmDocument && g_pmServer == schid;
     const bool channel = g_overlayKey.startsWith(QString::number(schid) + QLatin1Char(':'));
-    if (!channel && !g_overlayKey.startsWith(QStringLiteral("p:%1:").arg(schid))) return;
+    if (!nativePm && !channel && !g_overlayKey.startsWith(QStringLiteral("p:%1:").arg(schid))) return;
     ChatMessage msg;
     msg.text = text;
     msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
     msg.system = true;
     msg.severity = 2;
-    g_chatHistory[g_overlayKey].append(msg);
+    // A native PM is rebuilt from its document. Show local feedback without
+    // writing it into the peer's history or modifying the native document.
+    if (!nativePm) g_chatHistory[g_overlayKey].append(msg);
     g_modernChat->addMessage(msg);
 }
 
-void queueOperationError(uint64 schid, const QString& text) {
-    if (!qApp || !g_guard) return;
-    QMetaObject::invokeMethod(g_guard, [schid, text] { appendOperationError(schid, text); },
-                              Qt::QueuedConnection);
+struct ReportedError {
+    uint64 server;
+    QString text;
+    bool native;
+    std::chrono::steady_clock::time_point time;
+};
+QVector<ReportedError> g_recentOperationErrors;
+
+QString operationErrorKey(QString text) {
+    static const QRegularExpression code(QStringLiteral(R"(（错误码 \d+）$)"));
+    static const QRegularExpression permission(QStringLiteral(R"(\b[bis]_\w+_(?:power|permission)\b)"));
+    text.remove(code);
+    // TS3 localizes the native line, while the SDK may supply English and
+    // format the failed permission differently. A named permission survives both.
+    const auto match = permission.match(text);
+    if (match.hasMatch()) return match.captured();
+    const QString key = text.simplified().toCaseFolded();
+    const QString translated = QCoreApplication::translate("teamspeak_core_error", "ts_core_error_2568");
+    if (key == translated.toCaseFolded() || key == QLatin1String("insufficient client permissions") ||
+        key == QLatin1String("insufficient permissions") || key == QStringLiteral("权限不足") ||
+        key == QStringLiteral("權限不足")) return QStringLiteral("权限不足");
+    return key;
+}
+
+void queueOperationError(uint64 schid, const QString& text, bool native = false) {
+    if (!qApp || !g_guard || !schid) return;
+    QMetaObject::invokeMethod(g_guard, [schid, text, native] {
+        const auto now = std::chrono::steady_clock::now();
+        while (!g_recentOperationErrors.isEmpty() &&
+               now - g_recentOperationErrors.first().time > std::chrono::seconds(1))
+            g_recentOperationErrors.removeFirst();
+        const QString key = operationErrorKey(text);
+        // Consume one report from the opposite source. Two real denials from
+        // the same source must remain two separate rows, even back to back.
+        for (int i = 0; i < g_recentOperationErrors.size(); ++i) {
+            const auto& report = g_recentOperationErrors.at(i);
+            if (report.server != schid || report.native == native || report.text != key) continue;
+            g_recentOperationErrors.removeAt(i);
+            return;
+        }
+        g_recentOperationErrors.append({schid, key, native, now});
+        appendOperationError(schid, text);
+    }, Qt::QueuedConnection);
 }
 
 // GUI thread only: callbacks may snapshot SDK names, but must not read the UI cache.
@@ -1817,22 +1864,29 @@ void queueChannelChange(uint64 schid, uint64 channelId, anyID invokerId,
     }, Qt::QueuedConnection);
 }
 
-// MainWindow hosts all floating plugin UI. Re-found on every use: the client
-// can rebuild its main window, which invalidates the old pointer.
-QWidget* mainWindowHost() {
-    for (QWidget* w : QApplication::topLevelWidgets()) {
-        if (w && w->isWindow() &&
-            QString::fromLatin1(w->metaObject()->className()) == QLatin1String("MainWindow"))
-            return w;
-    }
-    return nullptr;
+bool isMainWindowHost(QWidget* widget) {
+    return widget && widget->inherits("MainWindow");
 }
 
-// Keep notifications above the content on every chat tab.
+// Prefer the window that owns chat when an old and a new TS3 window coexist.
+QWidget* mainWindowHost() {
+    QWidget* chatWindow = g_chatTab ? g_chatTab->window() : nullptr;
+    if (isMainWindowHost(chatWindow)) return chatWindow;
+    QWidget* fallback = nullptr;
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (!isMainWindowHost(w)) continue;
+        if (w->isVisible()) return w;
+        if (!fallback) fallback = w;
+    }
+    return fallback;
+}
+
+// A child of the main window stays outside the replaceable content wrapper
+// and above both the native pages and the plugin's rounded chat surface.
 void showToast(const QString& title, const QString& body,
                std::function<void()> onActivate = {}) {
     if (!qApp) return;
-    QWidget* host = g_contentHost ? g_contentHost.data() : mainWindowHost();
+    QWidget* host = mainWindowHost();
     if (!host) return;
     if (!g_notifyToast || g_notifyToast->parentWidget() != host) {
         if (g_notifyToast) delete g_notifyToast.data();
@@ -2019,6 +2073,12 @@ void openNotificationTarget(uint64 schid, const QString& key) {
     focusMainWindow();
 }
 
+bool isReadingConversation(const QString& key) {
+    return !key.isEmpty() && g_overlayKey == key && g_modernChat && !g_infoShown &&
+           g_modernChat->window()->isActiveWindow() && !g_modernChat->window()->isMinimized() &&
+           g_modernChat->isVisible() && !g_modernChat->viewport()->visibleRegion().isEmpty();
+}
+
 void notifyIncoming(uint64 schid, const QString& title, const QString& body,
                     const QString& chatKey, bool showCard) {
     if (!schid || activeChatServer() != schid) return;
@@ -2057,6 +2117,49 @@ QTextDocument* nativeChatDocument(QWidget* page) {
     if (!log || log->objectName() != QLatin1String("ChatTab"))
         log = page->findChild<QTextEdit*>(QStringLiteral("ChatTab"));
     return log ? log->document() : nullptr;
+}
+
+// QTextDocument discards HTML class names after import. Preserve the stock
+// server-error paragraph type without changing the native log's appearance.
+constexpr int nativeServerErrorState = 68012;
+const QString nativeServerErrorStyle = QStringLiteral("\n.TextMessage_ServerError { -qt-user-state: %1; }\n")
+    .arg(nativeServerErrorState);
+
+void watchNativeServerErrors(QTextDocument* doc, uint64 schid) {
+    if (doc != g_serverErrorDocument || schid != g_serverErrorConnection) {
+        QObject::disconnect(g_serverErrorDocumentConn);
+        if (g_serverErrorDocument && g_serverErrorDocument->defaultStyleSheet() == g_serverErrorStyle + nativeServerErrorStyle)
+            g_serverErrorDocument->setDefaultStyleSheet(g_serverErrorStyle);
+        g_serverErrorStyle.clear();
+        g_serverErrorDocument = doc;
+        g_serverErrorConnection = schid;
+        if (doc) {
+            g_serverErrorDocumentConn = QObject::connect(doc, &QTextDocument::contentsChange, g_guard,
+                [doc, schid](int position, int, int added) {
+                    if (!added || activeChatServer() != schid) return;
+                    // Only visit newly inserted blocks, not the previous block
+                    // at the append boundary or old lines trimmed by TS3.
+                    for (QTextBlock block = doc->findBlock(position); block.isValid() &&
+                         block.position() < position + added; block = block.next()) {
+                        if (block.userState() != nativeServerErrorState) continue;
+                        if (block.position() + block.length() - 1 <= position) continue;
+                        QString text = block.text();
+                        text.remove(QChar::ObjectReplacementCharacter);
+                        static const QRegularExpression timestamp(QStringLiteral(R"(^\s*<[^>]+>\s*)"));
+                        text.remove(timestamp);
+                        text.replace(QChar::LineSeparator, QLatin1Char('\n'));
+                        text = text.trimmed();
+                        if (!text.isEmpty()) queueOperationError(schid, text, true);
+                    }
+                });
+        }
+    }
+    if (!doc) return;
+    // TS3 can replace its document stylesheet when the theme changes.
+    const QString style = doc->defaultStyleSheet();
+    if (style.endsWith(nativeServerErrorStyle)) return;
+    g_serverErrorStyle = style;
+    doc->setDefaultStyleSheet(style + nativeServerErrorStyle);
 }
 
 // A TS3 paragraph is an optional icon/time followed by a linked sender and
@@ -2186,6 +2289,7 @@ void updateChatOverlay() {
     uint64 schid = 0;
     uint64 channel = 0;
     currentChannelInfo(schid, channel, channelName);
+    watchNativeServerErrors(schid ? nativeChatDocument(g_chatTab->widget(0)) : nullptr, schid);
 
     const int index = g_chatTab->currentIndex();
     const QString tabText = index >= 0 ? g_chatTab->tabText(index).trimmed() : QString();
@@ -2819,6 +2923,8 @@ static void cleanupUiOnGuiThread() {
     g_chatHistory.clear();
     g_chatScroll.clear();
     g_clientNames.clear();
+    watchNativeServerErrors(nullptr, 0);
+    g_recentOperationErrors.clear();
     watchPmDocument(nullptr);
     g_privateAliases.clear();
     g_overlayKey.clear();
@@ -2979,6 +3085,11 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
                 text = QStringLiteral("与服务器的连接已断开");
             }
             g_connectionStatus.remove(serverConnectionHandlerID);
+            if (g_serverErrorConnection == serverConnectionHandlerID) watchNativeServerErrors(nullptr, 0);
+            for (int i = g_recentOperationErrors.size() - 1; i >= 0; --i) {
+                if (g_recentOperationErrors.at(i).server == serverConnectionHandlerID)
+                    g_recentOperationErrors.removeAt(i);
+            }
             g_clientNames.remove(serverConnectionHandlerID);
             g_privateAliases.remove(serverConnectionHandlerID);
             if (g_notifyServer == serverConnectionHandlerID) dismissChatNotice();
@@ -3313,7 +3424,8 @@ extern "C" __declspec(dllexport) int ts3plugin_onTextMessageEvent(
         if (!g_pmDocument && g_overlayKey == key && g_modernChat) g_modernChat->addMessage(msg);
         if (isSelf) return;
 
-        const bool visible = g_overlayKey == key && g_modernChat && g_modernChat->isVisible() && !g_infoShown;
+        const bool visible = targetMode == TextMessageTarget_CLIENT ? isReadingConversation(key)
+            : g_overlayKey == key && g_modernChat && g_modernChat->isVisible() && !g_infoShown;
         QString title;
         if (targetMode == TextMessageTarget_CHANNEL) {
             title = channelName.isEmpty() ? QStringLiteral("%1 发来频道消息").arg(name)

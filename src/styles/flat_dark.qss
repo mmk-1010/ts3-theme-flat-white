@@ -290,6 +290,49 @@ QPushButton:checked:focus:enabled {
 }
 
 /* ------------------------------------------------------------------ */
+/* Incoming poke dialog                                                */
+/* ------------------------------------------------------------------ */
+
+/* TS3 uses MsgDialog as the object name; scope by class to leave other
+   message dialogs and the send-poke form alone. */
+PokeDialog QLabel#serverLabel {
+	color: #CACACA;
+	font-size: 12px;
+	padding: 0 16px;
+}
+
+/* The native browser already supplies a document inset and a transparent
+   background. Don't give the read-only message an input field's frame. */
+PokeDialog QTextBrowser#msgTextBrowser {
+	border: none;
+	padding: 0;
+}
+
+PokeDialog QDialogButtonBox#buttonBox {
+	qproperty-centerButtons: false;
+}
+
+PokeDialog QDialogButtonBox#buttonBox QPushButton {
+	background-color: #2D2D2D;
+	color: #F2F2F2;
+	border-color: #575757;
+	min-width: 56px;
+}
+
+PokeDialog QDialogButtonBox#buttonBox QPushButton:hover {
+	background-color: #333333;
+	border-color: #838383;
+}
+
+PokeDialog QDialogButtonBox#buttonBox QPushButton:pressed {
+	background-color: #3D3D3D;
+}
+
+PokeDialog QDialogButtonBox#buttonBox QPushButton:focus {
+	border-color: #2DD4BF;
+}
+
+/* ------------------------------------------------------------------ */
 /* Inputs                                                              */
 /* ------------------------------------------------------------------ */
 
