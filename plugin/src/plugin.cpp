@@ -3114,7 +3114,7 @@ extern "C" __declspec(dllexport) void ts3plugin_onConnectStatusChangeEvent(
         }
         if (!text.isEmpty()) appendSystemMessage(serverConnectionHandlerID, text, severity);
         if (g_userPanel) {
-            if (status == STATUS_CONNECTION_ESTABLISHED) g_userPanel->applyAwayPreset(serverConnectionHandlerID);
+            if (status == STATUS_CONNECTION_ESTABLISHED) g_userPanel->applyConnectionPresets(serverConnectionHandlerID);
             g_userPanel->refresh();
         }
     }, Qt::QueuedConnection);

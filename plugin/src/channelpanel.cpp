@@ -732,12 +732,22 @@ void UserPanel::updatePointerVisuals(qreal progress) {
     if (!dirty.isEmpty()) update(dirty);
 }
 
-bool UserPanel::awayPresetVisible() const {
-    return m_awayPresets.contains(m_server) || (!m_connected && m_awayPresets.contains(0));
+namespace {
+constexpr int selfFlags[] = {CLIENT_AWAY, CLIENT_INPUT_MUTED, CLIENT_OUTPUT_MUTED};
+constexpr int selfEnabled[] = {AWAY_ZZZ, MUTEINPUT_MUTED, MUTEOUTPUT_MUTED};
+}
+
+bool UserPanel::presetVisible(int button) const {
+    const auto& presets = m_presets[button];
+    return presets.contains(m_server) || (!m_connected && presets.contains(0));
 }
 
 bool UserPanel::buttonActive(int index) const {
-    if (index == 0) return m_away || awayPresetVisible();
+    return liveState(index) || presetVisible(index);
+}
+
+bool UserPanel::liveState(int index) const {
+    if (index == 0) return m_away;
     if (index == 1) return m_inputMuted;
     return m_outputMuted;
 }
@@ -809,22 +819,29 @@ void UserPanel::publishSelfState(quint64 server, unsigned short self, int flag, 
     if (m_stateChange) m_stateChange(server, self, flag, value);
 }
 
-void UserPanel::applyAwayPreset(quint64 server) {
-    if (!server || (!m_awayPresets.contains(server) && !m_awayPresets.contains(0))) return;
-    if (connectionStatus(server) != STATUS_CONNECTION_ESTABLISHED) return;
+void UserPanel::applyConnectionPresets(quint64 server) {
+    if (!server || connectionStatus(server) != STATUS_CONNECTION_ESTABLISHED) return;
     // Once the next connection is known, keep a failed preset on that tab.
-    m_awayPresets.remove(0);
-    m_awayPresets.insert(server);
+    bool pending = false;
+    for (auto& presets : m_presets) {
+        if (presets.remove(0)) presets.insert(server);
+        pending |= presets.contains(server);
+    }
+    if (!pending) return;
     refresh();
     const unsigned short self = selfId(server);
     if (!self) return;
 
-    int away = AWAY_NONE;
-    const bool alreadyAway = m_funcs.getClientVariableAsInt &&
-        m_funcs.getClientVariableAsInt(server, self, CLIENT_AWAY, &away) == ERROR_ok && away != AWAY_NONE;
-    if (!alreadyAway && !writeSelfState(server, CLIENT_AWAY, AWAY_ZZZ, AWAY_NONE)) return;
-    m_awayPresets.remove(server);
-    publishSelfState(server, self, CLIENT_AWAY, true);
+    for (int button = 0; button < kButtonCount; ++button) {
+        if (!m_presets[button].contains(server)) continue;
+        const int flag = selfFlags[button];
+        int value = 0;
+        const bool alreadySet = m_funcs.getClientVariableAsInt &&
+            m_funcs.getClientVariableAsInt(server, self, flag, &value) == ERROR_ok && value != 0;
+        if (!alreadySet && !writeSelfState(server, flag, selfEnabled[button], 0)) continue;
+        m_presets[button].remove(server);
+        publishSelfState(server, self, flag, true);
+    }
     update();
 }
 
@@ -916,7 +933,10 @@ void UserPanel::paintEvent(QPaintEvent*) {
 
         QString state = QStringLiteral("在线");
         if (m_away) state = QStringLiteral("离开");
-        else if (awayPresetVisible()) state = QStringLiteral("预设离开");
+        else if (presetVisible(0)) state = QStringLiteral("预设离开");
+        else if (presetVisible(1) && presetVisible(2)) state = QStringLiteral("预设麦克风和耳机静音");
+        else if (presetVisible(1)) state = QStringLiteral("预设麦克风静音");
+        else if (presetVisible(2)) state = QStringLiteral("预设耳机静音");
         else if (!m_connected) state = QStringLiteral("离线");
         else if (m_outputMuted) state = QStringLiteral("耳机静音");
         else if (m_inputMuted) state = QStringLiteral("麦克风静音");
@@ -954,9 +974,9 @@ void UserPanel::paintEvent(QPaintEvent*) {
         if (i == 0)
             drawAwayOutline(p, icon, color);
         else if (i == 1)
-            drawMic(p, icon, color, m_inputMuted);
+            drawMic(p, icon, color, active);
         else
-            drawSpeaker(p, icon, color, m_outputMuted);
+            drawSpeaker(p, icon, color, active);
     }
 }
 
@@ -967,27 +987,23 @@ void UserPanel::mousePressEvent(QMouseEvent* e) {
     if (button < 0) return;
     // Refresh first in case this click follows a server switch.
     refresh();
-    if (button == 0) {
-        if (awayPresetVisible() && !m_away) {
-            m_awayPresets.remove(m_server);
-            if (!m_connected) m_awayPresets.remove(0);
-            update();
-            return;
-        }
-        if (!m_connected || !m_self) {
-            m_awayPresets.insert(m_server);
-            update();
-            return;
-        }
+    auto& presets = m_presets[button];
+    if (presetVisible(button) && !liveState(button)) {
+        presets.remove(m_server);
+        if (!m_connected) presets.remove(0);
+        update();
+        return;
     }
-    if (!m_self) return;
-    const int flag = button == 0 ? CLIENT_AWAY
-                                 : (button == 1 ? CLIENT_INPUT_MUTED : CLIENT_OUTPUT_MUTED);
-    const bool active = button == 0 ? m_away : buttonActive(button);
-    const int enabled = button == 0 ? AWAY_ZZZ
-                                     : (button == 1 ? MUTEINPUT_MUTED : MUTEOUTPUT_MUTED);
+    if (!m_connected || !m_self) {
+        presets.insert(m_server);
+        update();
+        return;
+    }
+    const int flag = selfFlags[button];
+    const bool active = liveState(button);
+    const int enabled = selfEnabled[button];
     if (writeSelfState(m_server, flag, active ? 0 : enabled, active ? enabled : 0)) {
-        if (button == 0) m_awayPresets.remove(m_server);
+        presets.remove(m_server);
         publishSelfState(m_server, m_self, flag, !active);
     }
 }
@@ -1031,10 +1047,10 @@ bool UserPanel::event(QEvent* e) {
         static const char* const onText[] = {"设为离开", "静音麦克风", "静音耳机"};
         static const char* const offText[] = {"取消离开", "取消麦克风静音", "取消耳机静音"};
         const char* text = buttonActive(button) ? offText[button] : onText[button];
-        if (button == 0) {
-            if (awayPresetVisible() && !m_away) text = "取消预设离开";
-            else if (!m_connected || !m_self) text = "连接后设为离开";
-        }
+        static const char* const armText[] = {"连接后设为离开", "连接后静音麦克风", "连接后静音耳机"};
+        static const char* const cancelText[] = {"取消预设离开", "取消预设麦克风静音", "取消预设耳机静音"};
+        if (presetVisible(button) && !liveState(button)) text = cancelText[button];
+        else if (!m_connected || !m_self) text = armText[button];
         QToolTip::showText(help->globalPos(), QString::fromUtf8(text), this);
         return true;
     }

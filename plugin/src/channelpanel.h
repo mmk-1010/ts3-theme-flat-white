@@ -169,7 +169,7 @@ public:
     void refresh();
     void setTalking(bool talking);
     void setSelfState(quint64 server, unsigned short client, int flag, bool value, bool local);
-    void applyAwayPreset(quint64 server);
+    void applyConnectionPresets(quint64 server);
     void setStateChangeHandler(std::function<void(quint64, unsigned short, int, bool)> handler) {
         m_stateChange = std::move(handler);
     }
@@ -208,7 +208,8 @@ private:
     int connectionStatus(quint64 server) const;
     unsigned short selfId(quint64 server) const;
     bool writeSelfState(quint64 server, int flag, int value, int previous);
-    bool awayPresetVisible() const;
+    bool presetVisible(int button) const;
+    bool liveState(int button) const;
     void publishSelfState(quint64 server, unsigned short self, int flag, bool value);
 
     TS3Functions m_funcs{};
@@ -220,7 +221,7 @@ private:
     bool m_outputMuted = false;
     bool m_away = false;
     // Zero is the initial page before TeamSpeak assigns a connection handler.
-    QSet<quint64> m_awayPresets;
+    std::array<QSet<quint64>, kButtonCount> m_presets;
     bool m_talking = false;
     SelfStateChanges m_selfChanges;
     std::function<void(quint64, unsigned short, int, bool)> m_stateChange;
