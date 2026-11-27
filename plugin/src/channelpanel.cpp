@@ -1674,7 +1674,7 @@ struct ChatRowGeom {
     ChatTextGeom textGeom;
 };
 
-ChatRowGeom buildChatRow(int width, const QModelIndex& index, const QPaintDevice* device) {
+ChatRowGeom buildChatRow(int width, const QModelIndex& index, const QPaintDevice* device, bool showTime) {
     ChatRowGeom g;
     if (!index.isValid()) return g;
     g.valid = true;
@@ -1691,6 +1691,10 @@ ChatRowGeom buildChatRow(int width, const QModelIndex& index, const QPaintDevice
         g.textGeom = buildChatText(sender.isEmpty() ? text : sender + QStringLiteral("  ") + text,
                                    chatTimeFont(), innerWidth, device, Qt::AlignHCenter);
         g.height = qMax(minimumHeight, g.textGeom.height + verticalInsets);
+        if (showTime && !index.data(ChatTime).toString().isEmpty()) {
+            g.metadataHeight = QFontMetrics(chatTimeFont(), device).height();
+            g.height += g.metadataHeight;
+        }
         g.textRect = QRect(sideInset, g.height - bottomInset - g.textGeom.height,
                            innerWidth, g.textGeom.height);
         return g;
@@ -1745,7 +1749,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
         const QWidget* viewport = m_view->viewport();
         const int width = option.rect.width() > 0 ? option.rect.width() : viewport->width();
-        const ChatRowGeom row = buildChatRow(width, index, viewport);
+        const ChatRowGeom row = buildChatRow(width, index, viewport, m_view->showsTimestamps());
         return QSize(width, row.height);
     }
 
@@ -1756,7 +1760,7 @@ public:
         p->setRenderHint(QPainter::Antialiasing, true);
         p->fillRect(r, discord::bg());
 
-        const ChatRowGeom row = buildChatRow(r.width(), index, m_view->viewport());
+        const ChatRowGeom row = buildChatRow(r.width(), index, m_view->viewport(), m_view->showsTimestamps());
         if (!row.valid) {
             p->restore();
             return;
@@ -1774,6 +1778,12 @@ public:
         m_view->selectionRangeForRow(index.row(), selA, selB);
         const QPoint textOrigin = row.textRect.topLeft() + r.topLeft();
         if (row.system) {
+            if (row.metadataHeight > 0) {
+                p->setFont(chatTimeFont());
+                p->setPen(discord::faint());
+                p->drawText(QRect(r.left(), textOrigin.y() - row.metadataHeight, r.width(), row.metadataHeight),
+                            Qt::AlignCenter, index.data(ChatTime).toString());
+            }
             const int severity = index.data(ChatSeverity).toInt();
             const bool poke = index.data(ChatPoke).toBool();
             QColor ink = discord::muted();
@@ -1796,7 +1806,7 @@ public:
 
         const bool self = index.data(ChatSelf).toBool();
         const QString sender = self ? QStringLiteral("我") : index.data(ChatSender).toString();
-        const QString time = index.data(ChatTime).toString();
+        const QString time = m_view->showsTimestamps() ? index.data(ChatTime).toString() : QString();
         const QRect meta = r.adjusted(kChatPad, kChatPadY, -kChatPad, 0);
         const QFont nameFont = chatNameFont();
         const QFont timeFont = chatTimeFont();
@@ -1838,6 +1848,9 @@ private:
 }  // namespace
 
 ModernChat::ModernChat(QWidget* parent) : QListWidget(parent) {
+    m_timestampPeek.setSingleShot(true);
+    m_timestampPeek.setInterval(3000);
+    connect(&m_timestampPeek, &QTimer::timeout, this, [this] { doItemsLayout(); viewport()->update(); });
     setItemDelegate(new ChatBubbleDelegate(this));
     setFrameShape(QFrame::NoFrame);
     setSelectionMode(QAbstractItemView::NoSelection); // Text ranges, not whole-item selection.
@@ -2107,7 +2120,7 @@ ModernChat::TextPos ModernChat::positionAt(const QPoint& viewportPos) const {
 
     p.row = row;
     const QRect rowRect = visualItemRect(item(row));
-    const ChatRowGeom g = buildChatRow(rowRect.width(), model()->index(row, 0), viewport());
+    const ChatRowGeom g = buildChatRow(rowRect.width(), model()->index(row, 0), viewport(), showsTimestamps());
     if (!g.valid || g.textGeom.text.isEmpty()) return p;
 
     const QPointF local(pt - rowRect.topLeft() - g.textRect.topLeft());
@@ -2147,6 +2160,13 @@ void ModernChat::focusInEvent(QFocusEvent* ev) {
 }
 
 void ModernChat::mousePressEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::MiddleButton) {
+        const bool alreadyVisible = showsTimestamps();
+        m_timestampPeek.start();
+        if (!alreadyVisible) { doItemsLayout(); viewport()->update(); }
+        ev->accept();
+        return;
+    }
     m_keyboardNavigation = false;
     if (ev->button() != Qt::LeftButton) {
         QListWidget::mousePressEvent(ev);
@@ -2181,6 +2201,7 @@ void ModernChat::mouseMoveEvent(QMouseEvent* ev) {
 }
 
 void ModernChat::mouseReleaseEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::MiddleButton) { ev->accept(); return; }
     if (ev->button() == Qt::LeftButton && m_selecting) {
         m_selecting = false;
         ev->accept();
@@ -2190,6 +2211,7 @@ void ModernChat::mouseReleaseEvent(QMouseEvent* ev) {
 }
 
 void ModernChat::mouseDoubleClickEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::MiddleButton) { mousePressEvent(ev); return; }
     if (ev->button() != Qt::LeftButton) {
         QListWidget::mouseDoubleClickEvent(ev);
         return;

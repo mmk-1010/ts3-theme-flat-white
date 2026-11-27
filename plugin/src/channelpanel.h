@@ -15,6 +15,7 @@
 #include <QRectF>
 #include <QSet>
 #include <QString>
+#include <QTimer>
 #include <QVariantAnimation>
 #include <QVector>
 #include <array>
@@ -324,6 +325,7 @@ public:
     bool selectionRangeForRow(int row, int& start, int& end) const;
     QString rowPlainText(int row) const;
     bool showsKeyboardCursor() const { return m_keyboardNavigation; }
+    bool showsTimestamps() const { return m_timestampPeek.isActive(); }
 
 protected:
     void paintEvent(QPaintEvent* ev) override;
@@ -356,6 +358,7 @@ private:
     void setReadingRow(int row);
     void restoreScrollPosition();
     void rememberScrollPosition(int value);
+    QTimer m_timestampPeek;
     void stopWheelScroll();
 
     int m_selAnchorRow = -1;

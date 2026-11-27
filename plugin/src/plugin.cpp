@@ -1735,7 +1735,7 @@ QString channelNameById(uint64 schid, uint64 channelId) {
 void appendSystemMessage(uint64 schid, const QString& text, int severity = 0, bool poke = false) {
     ChatMessage msg;
     msg.text = text;
-    msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
+    msg.time = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     msg.system = true;
     msg.severity = severity;
     msg.poke = poke;
@@ -1786,7 +1786,7 @@ void appendOperationError(uint64 schid, const QString& text) {
     if (!nativePm && !channel && !g_overlayKey.startsWith(QStringLiteral("p:%1:").arg(schid))) return;
     ChatMessage msg;
     msg.text = text;
-    msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
+    msg.time = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     msg.system = true;
     msg.severity = 2;
     // A native PM is rebuilt from its document. Show local feedback without
@@ -3417,7 +3417,7 @@ extern "C" __declspec(dllexport) int ts3plugin_onTextMessageEvent(
         ChatMessage msg;
         msg.sender = name;
         msg.text = text;
-        msg.time = QTime::currentTime().toString(QStringLiteral("HH:mm"));
+        msg.time = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         msg.self = isSelf;
         g_chatHistory[key].append(msg);
         if (activeChatServer() != schid) return;
